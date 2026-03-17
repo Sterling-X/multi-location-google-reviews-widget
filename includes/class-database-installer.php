@@ -1,0 +1,118 @@
+<?php
+/**
+ * Database installer for Multi-Location Google Reviews Widget.
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+class Database_Installer {
+
+	/**
+	 * Run plugin activation setup.
+	 *
+	 * @return void
+	 */
+	public static function activate() {
+		self::create_tables();
+	}
+
+	/**
+	 * Create or update required plugin tables.
+	 *
+	 * @return void
+	 */
+	private static function create_tables() {
+		global $wpdb;
+
+		$charset_collate = $wpdb->get_charset_collate();
+		$locations_table = $wpdb->prefix . 'mlgr_locations';
+		$reviews_table   = $wpdb->prefix . 'mlgr_reviews';
+		$error_logs_table = $wpdb->prefix . 'mlgr_error_logs';
+
+		require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+
+		$locations_sql = "CREATE TABLE {$locations_table} (
+			id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+			google_place_id VARCHAR(191) NOT NULL,
+			name VARCHAR(255) NOT NULL DEFAULT '',
+			photo_url VARCHAR(255) NULL,
+			last_sync DATETIME NULL,
+			sync_status ENUM('pending', 'active', 'completed', 'error') NOT NULL DEFAULT 'pending',
+			PRIMARY KEY  (id),
+			UNIQUE KEY uniq_google_place_id (google_place_id)
+		) ENGINE=InnoDB {$charset_collate};";
+
+		$reviews_sql = "CREATE TABLE {$reviews_table} (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			location_id INT UNSIGNED NOT NULL,
+			google_review_id VARCHAR(191) NOT NULL,
+			author_name VARCHAR(191) NOT NULL DEFAULT '',
+			author_photo VARCHAR(255) NULL,
+			rating TINYINT UNSIGNED NOT NULL DEFAULT 0,
+			text TEXT NULL,
+			publish_date DATETIME NULL,
+			is_hidden TINYINT(1) NOT NULL DEFAULT 0,
+			PRIMARY KEY  (id),
+			UNIQUE KEY uniq_google_review_id (google_review_id),
+			KEY idx_location_id (location_id),
+			KEY idx_rating (rating)
+		) ENGINE=InnoDB {$charset_collate};";
+
+		$error_logs_sql = "CREATE TABLE {$error_logs_table} (
+			id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+			location_id INT UNSIGNED NOT NULL DEFAULT 0,
+			error_code VARCHAR(191) NOT NULL DEFAULT '',
+			error_message TEXT NULL,
+			endpoint_url VARCHAR(255) NULL,
+			`timestamp` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY  (id),
+			KEY idx_location_id (location_id),
+			KEY idx_timestamp (`timestamp`)
+		) ENGINE=InnoDB {$charset_collate};";
+
+		dbDelta( $locations_sql );
+		dbDelta( $reviews_sql );
+		dbDelta( $error_logs_sql );
+
+		self::maybe_add_foreign_key( $reviews_table, $locations_table );
+	}
+
+	/**
+	 * Add the foreign key for reviews.location_id if it does not yet exist.
+	 *
+	 * @param string $reviews_table   Reviews table name.
+	 * @param string $locations_table Locations table name.
+	 * @return void
+	 */
+	private static function maybe_add_foreign_key( $reviews_table, $locations_table ) {
+		global $wpdb;
+
+		$constraint_name = 'fk_mlgr_reviews_location';
+
+		$existing_fk = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT CONSTRAINT_NAME
+				FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+				WHERE TABLE_SCHEMA = DATABASE()
+					AND TABLE_NAME = %s
+					AND COLUMN_NAME = 'location_id'
+					AND REFERENCED_TABLE_NAME = %s
+				LIMIT 1",
+				$reviews_table,
+				$locations_table
+			)
+		);
+
+		if ( ! $existing_fk ) {
+			$wpdb->query(
+				"ALTER TABLE {$reviews_table}
+				ADD CONSTRAINT {$constraint_name}
+				FOREIGN KEY (location_id)
+				REFERENCES {$locations_table}(id)
+				ON DELETE CASCADE"
+			);
+		}
+	}
+}
