@@ -15,6 +15,11 @@ class Admin_Settings_Page {
 	const PAGE_SLUG = 'mlgr-settings';
 
 	/**
+	 * Welcome tab slug.
+	 */
+	const TAB_WELCOME = 'welcome';
+
+	/**
 	 * Main locations tab slug.
 	 */
 	const TAB_LOCATIONS = 'locations';
@@ -74,7 +79,9 @@ class Admin_Settings_Page {
 			<?php self::render_notice(); ?>
 			<?php self::render_tabs( $active_tab ); ?>
 
-			<?php if ( self::TAB_SYNC_LOGS === $active_tab ) : ?>
+			<?php if ( self::TAB_WELCOME === $active_tab ) : ?>
+				<?php self::render_welcome_tab(); ?>
+			<?php elseif ( self::TAB_SYNC_LOGS === $active_tab ) : ?>
 				<?php self::render_sync_logs_tab(); ?>
 			<?php else : ?>
 				<?php
@@ -96,6 +103,7 @@ class Admin_Settings_Page {
 	 */
 	private static function render_tabs( $active_tab ) {
 		$tabs = array(
+			self::TAB_WELCOME   => 'Welcome',
 			self::TAB_LOCATIONS => 'Locations',
 			self::TAB_SYNC_LOGS => 'Sync Logs',
 		);
@@ -110,16 +118,113 @@ class Admin_Settings_Page {
 					),
 					admin_url( 'options-general.php' )
 				);
-				$tab_class = self::TAB_LOCATIONS === $tab_slug && '' === $active_tab ? 'nav-tab nav-tab-active' : 'nav-tab';
-				if ( $tab_slug === $active_tab ) {
-					$tab_class = 'nav-tab nav-tab-active';
-				}
+				$tab_class = $tab_slug === $active_tab ? 'nav-tab nav-tab-active' : 'nav-tab';
 				?>
 				<a href="<?php echo esc_url( $tab_url ); ?>" class="<?php echo esc_attr( $tab_class ); ?>">
 					<?php echo esc_html( $tab_label ); ?>
 				</a>
 			<?php endforeach; ?>
 		</h2>
+		<?php
+	}
+
+	/**
+	 * Render welcome/help tab content.
+	 *
+	 * @return void
+	 */
+	private static function render_welcome_tab() {
+		?>
+		<h2>Welcome</h2>
+		<p>
+			This plugin helps you sync and display Google reviews from one or many locations using SerpApi and a simple shortcode.
+		</p>
+
+		<h3>Quick Start</h3>
+		<ol>
+			<li>Go to <strong>Locations</strong> and enter your <code>serpapi_key</code>.</li>
+			<li>Add one or more location IDs (Google Place ID or SerpApi Data ID).</li>
+			<li>Wait for sync, or click <strong>Force Resync</strong> for immediate refresh.</li>
+			<li>Place the shortcode on any page/post to render your reviews.</li>
+		</ol>
+
+		<h3>Shortcodes</h3>
+		<p>
+			Use <code>[ml_google_reviews]</code> for the review cards widget and <code>[ml_google_rating]</code> for a simple average rating summary.
+		</p>
+
+		<h4 style="margin-top: 18px;">1) Reviews Widget: <code>[ml_google_reviews]</code></h4>
+		<table class="widefat striped">
+			<thead>
+				<tr>
+					<th style="width: 170px;">Parameter</th>
+					<th>Description</th>
+					<th style="width: 330px;">Example</th>
+				</tr>
+			</thead>
+			<tbody>
+				<tr>
+					<td><code>location_id</code></td>
+					<td>Show reviews from one internal location ID only. Use <code>0</code> (default) to allow all locations.</td>
+					<td><code>[ml_google_reviews location_id="3"]</code></td>
+				</tr>
+				<tr>
+					<td><code>limit</code></td>
+					<td>Maximum number of reviews to display. Use <code>all</code> (default) for no limit.</td>
+					<td><code>[ml_google_reviews limit="9"]</code></td>
+				</tr>
+				<tr>
+					<td><code>min_rating</code></td>
+					<td>Minimum rating threshold from <code>0</code> to <code>5</code>.</td>
+					<td><code>[ml_google_reviews min_rating="4"]</code></td>
+				</tr>
+				<tr>
+					<td><code>exclude_ratings</code></td>
+					<td>Comma-separated ratings to exclude (1-5). Example: <code>1,2,3</code> shows only 4 and 5-star reviews.</td>
+					<td><code>[ml_google_reviews exclude_ratings="1,2,3"]</code></td>
+				</tr>
+				<tr>
+					<td><code>max_chars</code></td>
+					<td>Text truncation length (used in grid/slider cards).</td>
+					<td><code>[ml_google_reviews max_chars="150"]</code></td>
+				</tr>
+				<tr>
+					<td><code>layout</code></td>
+					<td>Display style: <code>grid</code> (default), <code>slider</code>, or <code>masonry</code>.</td>
+					<td><code>[ml_google_reviews layout="masonry"]</code></td>
+				</tr>
+			</tbody>
+		</table>
+
+		<p style="margin-top:12px;">
+			Combined example:
+			<code>[ml_google_reviews layout="slider" location_id="2" limit="12" min_rating="3" exclude_ratings="1,2" max_chars="150"]</code>
+		</p>
+
+		<h4 style="margin-top: 22px;">2) Rating Summary: <code>[ml_google_rating]</code></h4>
+		<table class="widefat striped">
+			<thead>
+				<tr>
+					<th style="width: 170px;">Parameter</th>
+					<th>Description</th>
+					<th style="width: 330px;">Example</th>
+				</tr>
+			</thead>
+			<tbody>
+				<tr>
+					<td><code>location_id</code></td>
+					<td>Optional internal location ID. If omitted, the first location in the database is used.</td>
+					<td><code>[ml_google_rating location_id="3"]</code></td>
+				</tr>
+			</tbody>
+		</table>
+
+		<p style="margin-top:12px;">
+			Examples:
+			<code>[ml_google_rating]</code>
+			<br />
+			<code>[ml_google_rating location_id="2"]</code>
+		</p>
 		<?php
 	}
 
@@ -527,9 +632,9 @@ class Admin_Settings_Page {
 	 * @return string
 	 */
 	private static function get_active_tab() {
-		$tab = isset( $_GET['tab'] ) ? sanitize_key( wp_unslash( $_GET['tab'] ) ) : self::TAB_LOCATIONS;
-		if ( ! in_array( $tab, array( self::TAB_LOCATIONS, self::TAB_SYNC_LOGS ), true ) ) {
-			return self::TAB_LOCATIONS;
+		$tab = isset( $_GET['tab'] ) ? sanitize_key( wp_unslash( $_GET['tab'] ) ) : self::TAB_WELCOME;
+		if ( ! in_array( $tab, array( self::TAB_WELCOME, self::TAB_LOCATIONS, self::TAB_SYNC_LOGS ), true ) ) {
+			return self::TAB_WELCOME;
 		}
 
 		return $tab;
@@ -570,7 +675,7 @@ class Admin_Settings_Page {
 	 */
 	private static function redirect_with_notice( $message, $type, $tab = self::TAB_LOCATIONS ) {
 		$tab = sanitize_key( $tab );
-		if ( ! in_array( $tab, array( self::TAB_LOCATIONS, self::TAB_SYNC_LOGS ), true ) ) {
+		if ( ! in_array( $tab, array( self::TAB_WELCOME, self::TAB_LOCATIONS, self::TAB_SYNC_LOGS ), true ) ) {
 			$tab = self::TAB_LOCATIONS;
 		}
 

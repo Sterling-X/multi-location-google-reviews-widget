@@ -10,12 +10,38 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Database_Installer {
 
 	/**
+	 * Internal schema version for upgrade tracking.
+	 */
+	const SCHEMA_VERSION = '1.1.0';
+
+	/**
+	 * Option key storing the last migrated schema version.
+	 */
+	const SCHEMA_VERSION_OPTION = 'mlgr_schema_version';
+
+	/**
 	 * Run plugin activation setup.
 	 *
 	 * @return void
 	 */
 	public static function activate() {
 		self::create_tables();
+		update_option( self::SCHEMA_VERSION_OPTION, self::SCHEMA_VERSION, false );
+	}
+
+	/**
+	 * Run one-time schema upgrades for existing installations.
+	 *
+	 * @return void
+	 */
+	public static function maybe_upgrade_schema() {
+		$installed_version = get_option( self::SCHEMA_VERSION_OPTION, '' );
+		if ( self::SCHEMA_VERSION === (string) $installed_version ) {
+			return;
+		}
+
+		self::create_tables();
+		update_option( self::SCHEMA_VERSION_OPTION, self::SCHEMA_VERSION, false );
 	}
 
 	/**
@@ -40,6 +66,8 @@ class Database_Installer {
 			photo_url VARCHAR(255) NULL,
 			last_sync DATETIME NULL,
 			sync_status ENUM('pending', 'active', 'completed', 'error') NOT NULL DEFAULT 'pending',
+			average_rating DECIMAL(2,1) NULL,
+			total_reviews INT UNSIGNED NULL,
 			PRIMARY KEY  (id),
 			UNIQUE KEY uniq_google_place_id (google_place_id)
 		) ENGINE=InnoDB {$charset_collate};";
@@ -76,7 +104,31 @@ class Database_Installer {
 		dbDelta( $reviews_sql );
 		dbDelta( $error_logs_sql );
 
+		self::maybe_add_location_summary_columns( $locations_table );
 		self::maybe_add_foreign_key( $reviews_table, $locations_table );
+	}
+
+	/**
+	 * Add location summary columns if they do not yet exist.
+	 *
+	 * @param string $locations_table Locations table name.
+	 * @return void
+	 */
+	private static function maybe_add_location_summary_columns( $locations_table ) {
+		global $wpdb;
+
+		$columns = $wpdb->get_col( "SHOW COLUMNS FROM `{$locations_table}`", 0 );
+		if ( ! is_array( $columns ) || empty( $columns ) ) {
+			return;
+		}
+
+		if ( ! in_array( 'average_rating', $columns, true ) ) {
+			$wpdb->query( "ALTER TABLE `{$locations_table}` ADD COLUMN average_rating DECIMAL(2,1) NULL AFTER sync_status" );
+		}
+
+		if ( ! in_array( 'total_reviews', $columns, true ) ) {
+			$wpdb->query( "ALTER TABLE `{$locations_table}` ADD COLUMN total_reviews INT UNSIGNED NULL AFTER average_rating" );
+		}
 	}
 
 	/**

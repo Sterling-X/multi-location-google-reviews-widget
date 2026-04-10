@@ -109,6 +109,12 @@ class Review_Syncer {
 			return;
 		}
 
+		self::update_location_rating_summary(
+			$location_id,
+			isset( $response['average_rating'] ) ? $response['average_rating'] : null,
+			isset( $response['total_reviews'] ) ? $response['total_reviews'] : null
+		);
+
 		if ( ! empty( $response['reviews'] ) && is_array( $response['reviews'] ) ) {
 			foreach ( $response['reviews'] as $review ) {
 				$saved = self::upsert_review( $reviews_table, $location_id, $review );
@@ -449,6 +455,53 @@ class Review_Syncer {
 				'id' => absint( $location_id ),
 			),
 			array( '%s' ),
+			array( '%d' )
+		);
+	}
+
+	/**
+	 * Persist location-level average rating and total review count.
+	 *
+	 * @param int        $location_id    Location ID.
+	 * @param float|int|null $average_rating Average rating value.
+	 * @param int|string|null $total_reviews  Total reviews value.
+	 * @return void
+	 */
+	private static function update_location_rating_summary( $location_id, $average_rating, $total_reviews ) {
+		global $wpdb;
+
+		$location_id = absint( $location_id );
+		if ( $location_id <= 0 ) {
+			return;
+		}
+
+		$fields  = array();
+		$formats = array();
+
+		if ( is_numeric( $average_rating ) ) {
+			$rating = (float) $average_rating;
+			$rating = max( 0.0, min( 5.0, $rating ) );
+			$fields['average_rating'] = round( $rating, 1 );
+			$formats[]               = '%f';
+		}
+
+		if ( is_numeric( $total_reviews ) ) {
+			$fields['total_reviews'] = max( 0, (int) $total_reviews );
+			$formats[]              = '%d';
+		}
+
+		if ( empty( $fields ) ) {
+			return;
+		}
+
+		$locations_table = $wpdb->prefix . 'mlgr_locations';
+		$wpdb->update(
+			$locations_table,
+			$fields,
+			array(
+				'id' => $location_id,
+			),
+			$formats,
 			array( '%d' )
 		);
 	}

@@ -15,6 +15,11 @@ class Review_Shortcode {
 	const SHORTCODE_TAG = 'ml_google_reviews';
 
 	/**
+	 * Location summary shortcode tag.
+	 */
+	const RATING_SHORTCODE_TAG = 'ml_google_rating';
+
+	/**
 	 * Transient cache TTL in seconds.
 	 */
 	const CACHE_TTL = HOUR_IN_SECONDS;
@@ -31,6 +36,7 @@ class Review_Shortcode {
 	 */
 	public static function init() {
 		add_shortcode( self::SHORTCODE_TAG, array( __CLASS__, 'render' ) );
+		add_shortcode( self::RATING_SHORTCODE_TAG, array( __CLASS__, 'render_rating' ) );
 	}
 
 	/**
@@ -46,6 +52,7 @@ class Review_Shortcode {
 			'location_id' => 0,
 			'limit'       => 'all',
 			'min_rating'  => 0,
+			'exclude_ratings' => '',
 			'max_chars'   => self::DEFAULT_MAX_CHARS,
 			'layout'      => 'grid',
 		);
@@ -54,6 +61,7 @@ class Review_Shortcode {
 		$location_id = absint( $atts['location_id'] );
 		$limit       = self::normalize_limit( $atts['limit'] );
 		$min_rating  = is_numeric( $atts['min_rating'] ) ? (int) $atts['min_rating'] : 0;
+		$exclude_ratings = self::normalize_exclude_ratings( $atts['exclude_ratings'] );
 		$max_chars   = self::normalize_max_chars( $atts['max_chars'] );
 		$layout      = self::normalize_layout( $atts['layout'] );
 		$cache_limit = null === $limit ? 'all' : $limit;
@@ -64,10 +72,11 @@ class Review_Shortcode {
 		$cache_key = 'mlgr_shortcode_' . md5(
 			wp_json_encode(
 				array(
-					'template'    => 'grid-widget-v5',
+					'template'    => 'grid-widget-v8',
 					'location_id' => $location_id,
 					'limit'       => $cache_limit,
 					'min_rating'  => $min_rating,
+					'exclude_ratings' => $exclude_ratings,
 					'max_chars'   => $max_chars,
 					'layout'      => $layout,
 					'anonymize'   => $anonymize,
@@ -89,6 +98,12 @@ class Review_Shortcode {
 			'r.rating >= %d',
 		);
 		$params      = array( $min_rating );
+
+		if ( ! empty( $exclude_ratings ) ) {
+			$placeholders = implode( ', ', array_fill( 0, count( $exclude_ratings ), '%d' ) );
+			$where_parts[] = "r.rating NOT IN ({$placeholders})";
+			$params        = array_merge( $params, $exclude_ratings );
+		}
 
 		if ( $location_id > 0 ) {
 			$where_parts[] = 'r.location_id = %d';
@@ -138,6 +153,70 @@ class Review_Shortcode {
 	}
 
 	/**
+	 * Render overall rating summary shortcode output.
+	 *
+	 * @param array<string, mixed> $atts Shortcode attributes.
+	 * @return string
+	 */
+	public static function render_rating( $atts ) {
+		global $wpdb;
+
+		$defaults = array(
+			'location_id' => 0,
+		);
+		$atts     = shortcode_atts( $defaults, (array) $atts, self::RATING_SHORTCODE_TAG );
+
+		$location_id     = absint( $atts['location_id'] );
+		$locations_table = $wpdb->prefix . 'mlgr_locations';
+		$row             = null;
+
+		if ( $location_id > 0 ) {
+			$row = $wpdb->get_row(
+				$wpdb->prepare(
+					"SELECT average_rating, total_reviews
+					FROM {$locations_table}
+					WHERE id = %d
+					LIMIT 1",
+					$location_id
+				),
+				ARRAY_A
+			);
+		} else {
+			$row = $wpdb->get_row(
+				"SELECT average_rating, total_reviews
+				FROM {$locations_table}
+				ORDER BY id ASC
+				LIMIT 1",
+				ARRAY_A
+			);
+		}
+
+		if ( ! is_array( $row ) ) {
+			return '';
+		}
+
+		$average_rating = isset( $row['average_rating'] ) && is_numeric( $row['average_rating'] )
+			? max( 0.0, min( 5.0, (float) $row['average_rating'] ) )
+			: null;
+		$total_reviews = isset( $row['total_reviews'] ) && is_numeric( $row['total_reviews'] )
+			? max( 0, (int) $row['total_reviews'] )
+			: null;
+
+		if ( null === $average_rating || null === $total_reviews ) {
+			return '';
+		}
+
+		$rating_text  = number_format_i18n( $average_rating, 1 );
+		$reviews_text = number_format_i18n( $total_reviews );
+		$review_label = ( 1 === $total_reviews ) ? 'review' : 'reviews';
+
+		return sprintf(
+			'<span class="mlgr-rating-text">%s</span>',
+			esc_html( $rating_text . ' / 5 based on ' . $reviews_text . ' ' . $review_label )
+		);
+	}
+
+	/**
 	 * Normalize shortcode limit value.
 	 *
 	 * Supported unlimited values: "all", "0", "-1", and empty.
@@ -181,6 +260,47 @@ class Review_Shortcode {
 			$max_chars = 1000;
 		}
 		return $max_chars;
+	}
+
+	/**
+	 * Normalize comma-separated exclude-ratings list.
+	 *
+	 * Example: "4,5" => array( 4, 5 ).
+	 *
+	 * @param mixed $raw_ratings Raw attribute value.
+	 * @return array<int, int>
+	 */
+	private static function normalize_exclude_ratings( $raw_ratings ) {
+		if ( is_array( $raw_ratings ) ) {
+			$raw_ratings = implode( ',', $raw_ratings );
+		}
+
+		$raw_ratings = trim( (string) $raw_ratings );
+		if ( '' === $raw_ratings ) {
+			return array();
+		}
+
+		$parts   = explode( ',', $raw_ratings );
+		$ratings = array();
+
+		foreach ( $parts as $part ) {
+			$part = trim( $part );
+			if ( '' === $part || ! is_numeric( $part ) ) {
+				continue;
+			}
+
+			$rating = (int) $part;
+			if ( $rating < 1 || $rating > 5 ) {
+				continue;
+			}
+
+			$ratings[] = $rating;
+		}
+
+		$ratings = array_values( array_unique( $ratings ) );
+		sort( $ratings, SORT_NUMERIC );
+
+		return $ratings;
 	}
 
 	/**

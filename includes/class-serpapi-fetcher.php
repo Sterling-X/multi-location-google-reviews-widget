@@ -28,6 +28,8 @@ class SerpApi_Fetcher {
 	 * @param string|null $next_request_url Optional direct next page URL.
 	 * @return array{
 	 *     reviews: array,
+	 *     average_rating: float|null,
+	 *     total_reviews: int|null,
 	 *     next_page_token: string|null,
 	 *     next_location_ref: string|null,
 	 *     next_request_url: string|null,
@@ -38,6 +40,8 @@ class SerpApi_Fetcher {
 	public function fetch_reviews( $location_ref, $next_page_token = null, $location_id = 0, $next_request_url = null ) {
 		$result = array(
 			'reviews'         => array(),
+			'average_rating'  => null,
+			'total_reviews'   => null,
 			'next_page_token' => null,
 			'next_location_ref' => null,
 			'next_request_url' => null,
@@ -155,6 +159,10 @@ class SerpApi_Fetcher {
 		if ( ! empty( $payload['reviews'] ) && is_array( $payload['reviews'] ) ) {
 			$result['reviews'] = $payload['reviews'];
 		}
+
+		$summary                 = $this->extract_location_summary( $payload );
+		$result['average_rating'] = $summary['average_rating'];
+		$result['total_reviews']  = $summary['total_reviews'];
 
 		$pagination                  = $this->extract_pagination_data( $payload );
 		$result['next_page_token']   = $pagination['next_page_token'];
@@ -327,6 +335,50 @@ class SerpApi_Fetcher {
 	}
 
 	/**
+	 * Extract location-level rating summary from known payload fields.
+	 *
+	 * @param array $payload API response payload.
+	 * @return array{average_rating: float|null, total_reviews: int|null}
+	 */
+	private function extract_location_summary( array $payload ) {
+		$average_rating = null;
+		$total_reviews  = null;
+
+		$rating_candidates = array(
+			self::array_get( $payload, array( 'place_info', 'rating' ) ),
+			self::array_get( $payload, array( 'place_results', 'rating' ) ),
+			self::array_get( $payload, array( 'knowledge_graph', 'rating' ) ),
+		);
+
+		foreach ( $rating_candidates as $candidate ) {
+			$normalized = self::normalize_rating_value( $candidate );
+			if ( null !== $normalized ) {
+				$average_rating = $normalized;
+				break;
+			}
+		}
+
+		$count_candidates = array(
+			self::array_get( $payload, array( 'place_info', 'reviews' ) ),
+			self::array_get( $payload, array( 'place_results', 'reviews' ) ),
+			self::array_get( $payload, array( 'knowledge_graph', 'reviews' ) ),
+		);
+
+		foreach ( $count_candidates as $candidate ) {
+			$normalized = self::normalize_review_count( $candidate );
+			if ( null !== $normalized ) {
+				$total_reviews = $normalized;
+				break;
+			}
+		}
+
+		return array(
+			'average_rating' => $average_rating,
+			'total_reviews'  => $total_reviews,
+		);
+	}
+
+	/**
 	 * Extract pagination values from known SerpApi response locations.
 	 *
 	 * @param array $payload API response payload.
@@ -461,5 +513,76 @@ class SerpApi_Fetcher {
 		}
 
 		return '';
+	}
+
+	/**
+	 * Safe nested array getter.
+	 *
+	 * @param array $source Source array.
+	 * @param array $path   Nested path.
+	 * @return mixed|null
+	 */
+	private static function array_get( array $source, array $path ) {
+		$value = $source;
+
+		foreach ( $path as $segment ) {
+			if ( ! is_array( $value ) || ! array_key_exists( $segment, $value ) ) {
+				return null;
+			}
+			$value = $value[ $segment ];
+		}
+
+		return $value;
+	}
+
+	/**
+	 * Normalize a rating value into a 1-decimal float within 0..5.
+	 *
+	 * @param mixed $value Raw rating.
+	 * @return float|null
+	 */
+	private static function normalize_rating_value( $value ) {
+		if ( ! is_scalar( $value ) ) {
+			return null;
+		}
+
+		$text = trim( (string) $value );
+		if ( '' === $text ) {
+			return null;
+		}
+
+		$text = str_replace( ',', '.', $text );
+		if ( ! is_numeric( $text ) ) {
+			return null;
+		}
+
+		$rating = (float) $text;
+		$rating = max( 0.0, min( 5.0, $rating ) );
+
+		return round( $rating, 1 );
+	}
+
+	/**
+	 * Normalize review count to a non-negative integer.
+	 *
+	 * @param mixed $value Raw review count.
+	 * @return int|null
+	 */
+	private static function normalize_review_count( $value ) {
+		if ( ! is_scalar( $value ) ) {
+			return null;
+		}
+
+		$text = trim( (string) $value );
+		if ( '' === $text ) {
+			return null;
+		}
+
+		$text = preg_replace( '/[^0-9]/', '', $text );
+		if ( ! is_string( $text ) || '' === $text || ! is_numeric( $text ) ) {
+			return null;
+		}
+
+		return max( 0, (int) $text );
 	}
 }
