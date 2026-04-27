@@ -69,7 +69,6 @@ class Review_Syncer {
 		}
 
 		$locations_table = $wpdb->prefix . 'mlgr_locations';
-		$reviews_table   = $wpdb->prefix . 'mlgr_reviews';
 
 		$location = $wpdb->get_row(
 			$wpdb->prepare(
@@ -116,24 +115,23 @@ class Review_Syncer {
 		);
 
 		if ( ! empty( $response['reviews'] ) && is_array( $response['reviews'] ) ) {
+			wp_suspend_cache_invalidation( true );
+
 			foreach ( $response['reviews'] as $review ) {
-				$saved = self::upsert_review( $reviews_table, $location_id, $review );
+				$saved = self::upsert_review( $location_id, $review );
 				if ( ! $saved ) {
-					$db_error = is_string( $wpdb->last_error ) ? trim( $wpdb->last_error ) : '';
-					$message  = '' !== $db_error
-						? 'Failed saving a review row: ' . $db_error
-						: 'Failed saving a review row.';
+					wp_suspend_cache_invalidation( false );
 
 					self::record_sync_error(
 						$location_id,
-						$message,
-						array(
-							'stage' => 'upsert_review',
-						)
+						'Failed saving a review post.',
+						array( 'stage' => 'upsert_review' )
 					);
 					return;
 				}
 			}
+
+			wp_suspend_cache_invalidation( false );
 		}
 
 		if ( ! empty( $response['next_page_token'] ) && is_string( $response['next_page_token'] ) ) {
@@ -259,16 +257,13 @@ class Review_Syncer {
 	}
 
 	/**
-	 * Insert or update one review row by unique google_review_id.
+	 * Insert or update one mlgr_review CPT post by google_review_id.
 	 *
-	 * @param string $reviews_table Reviews table.
-	 * @param int    $location_id   Location ID.
-	 * @param mixed  $review        Review payload.
+	 * @param int   $location_id Internal location ID.
+	 * @param mixed $review      Review payload from SerpApi.
 	 * @return bool
 	 */
-	private static function upsert_review( $reviews_table, $location_id, $review ) {
-		global $wpdb;
-
+	private static function upsert_review( $location_id, $review ) {
 		if ( ! is_array( $review ) ) {
 			return true;
 		}
@@ -311,34 +306,39 @@ class Review_Syncer {
 			)
 		);
 
-		$is_hidden = self::array_get( $review, array( 'is_hidden' ) );
-		$is_hidden = ! empty( $is_hidden ) ? 1 : 0;
+		$is_hidden   = ! empty( self::array_get( $review, array( 'is_hidden' ) ) );
+		$post_status = $is_hidden ? 'draft' : 'publish';
+		$post_date   = null !== $publish_date ? $publish_date : current_time( 'mysql' );
 
-		$query_result = $wpdb->query(
-			$wpdb->prepare(
-				"INSERT INTO {$reviews_table}
-					(location_id, google_review_id, author_name, author_photo, rating, `text`, publish_date, is_hidden)
-				VALUES (%d, %s, %s, %s, %d, %s, %s, %d)
-				ON DUPLICATE KEY UPDATE
-					location_id = VALUES(location_id),
-					author_name = VALUES(author_name),
-					author_photo = VALUES(author_photo),
-					rating = VALUES(rating),
-					`text` = VALUES(`text`),
-					publish_date = VALUES(publish_date),
-					is_hidden = VALUES(is_hidden)",
-				$location_id,
-				$google_review_id,
-				$author_name,
-				$author_photo,
-				$rating,
-				$text,
-				$publish_date,
-				$is_hidden
-				)
+		$existing_id = CPT_Manager::get_review_post_by_google_id( $google_review_id );
+
+		$post_data = array(
+			'post_type'    => CPT_Manager::POST_TYPE,
+			'post_title'   => $author_name,
+			'post_content' => (string) $text,
+			'post_status'  => $post_status,
+			'post_date'    => $post_date,
 		);
 
-		return false !== $query_result;
+		if ( $existing_id > 0 ) {
+			$post_data['ID'] = $existing_id;
+			$result          = wp_update_post( $post_data, true );
+		} else {
+			$result = wp_insert_post( $post_data, true );
+		}
+
+		if ( is_wp_error( $result ) || ! $result ) {
+			return false;
+		}
+
+		$post_id = (int) $result;
+
+		update_post_meta( $post_id, CPT_Manager::META_GOOGLE_REVIEW_ID, $google_review_id );
+		update_post_meta( $post_id, CPT_Manager::META_LOCATION_ID, absint( $location_id ) );
+		update_post_meta( $post_id, CPT_Manager::META_RATING, $rating );
+		update_post_meta( $post_id, CPT_Manager::META_AUTHOR_PHOTO, $author_photo );
+
+		return true;
 	}
 
 	/**
@@ -355,17 +355,16 @@ class Review_Syncer {
 		$wpdb->update(
 			$locations_table,
 			array(
-				'last_sync'    => current_time( 'mysql' ),
-				'sync_status'  => 'completed',
+				'last_sync'   => current_time( 'mysql' ),
+				'sync_status' => 'completed',
 			),
-			array(
-				'id' => absint( $location_id ),
-			),
+			array( 'id' => absint( $location_id ) ),
 			array( '%s', '%s' ),
 			array( '%d' )
 		);
 
 		self::clear_sync_error( $location_id );
+		Review_Shortcode::flush_cache();
 	}
 
 	/**

@@ -12,7 +12,7 @@ class Database_Installer {
 	/**
 	 * Internal schema version for upgrade tracking.
 	 */
-	const SCHEMA_VERSION = '1.1.0';
+	const SCHEMA_VERSION = '2.0.0';
 
 	/**
 	 * Option key storing the last migrated schema version.
@@ -41,7 +41,75 @@ class Database_Installer {
 		}
 
 		self::create_tables();
+
+		if ( version_compare( (string) $installed_version, '2.0.0', '<' ) ) {
+			self::migrate_reviews_to_cpt();
+		}
+
+		Review_Shortcode::flush_cache();
 		update_option( self::SCHEMA_VERSION_OPTION, self::SCHEMA_VERSION, false );
+	}
+
+	/**
+	 * Migrate existing rows from the mlgr_reviews custom table into mlgr_review CPT posts.
+	 *
+	 * Idempotent: reviews already migrated (identified by _mlgr_google_review_id meta) are skipped.
+	 * The source table is left intact as a backup.
+	 *
+	 * @return void
+	 */
+	private static function migrate_reviews_to_cpt() {
+		global $wpdb;
+
+		$reviews_table = $wpdb->prefix . 'mlgr_reviews';
+
+		$table_exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $reviews_table ) );
+		if ( $table_exists !== $reviews_table ) {
+			return;
+		}
+
+		$rows = $wpdb->get_results( "SELECT * FROM {$reviews_table}", ARRAY_A );
+		if ( empty( $rows ) || ! is_array( $rows ) ) {
+			return;
+		}
+
+		wp_suspend_cache_invalidation( true );
+
+		foreach ( $rows as $row ) {
+			$google_review_id = isset( $row['google_review_id'] ) ? (string) $row['google_review_id'] : '';
+			if ( '' === $google_review_id ) {
+				continue;
+			}
+
+			if ( CPT_Manager::get_review_post_by_google_id( $google_review_id ) > 0 ) {
+				continue;
+			}
+
+			$is_hidden   = ! empty( $row['is_hidden'] );
+			$post_status = $is_hidden ? 'draft' : 'publish';
+			$post_date   = ! empty( $row['publish_date'] ) ? (string) $row['publish_date'] : current_time( 'mysql' );
+
+			$post_id = wp_insert_post(
+				array(
+					'post_type'    => CPT_Manager::POST_TYPE,
+					'post_title'   => isset( $row['author_name'] ) ? (string) $row['author_name'] : '',
+					'post_content' => isset( $row['text'] ) ? (string) $row['text'] : '',
+					'post_status'  => $post_status,
+					'post_date'    => $post_date,
+				)
+			);
+
+			if ( is_wp_error( $post_id ) || ! $post_id ) {
+				continue;
+			}
+
+			update_post_meta( $post_id, CPT_Manager::META_GOOGLE_REVIEW_ID, $google_review_id );
+			update_post_meta( $post_id, CPT_Manager::META_LOCATION_ID, absint( $row['location_id'] ) );
+			update_post_meta( $post_id, CPT_Manager::META_RATING, (int) $row['rating'] );
+			update_post_meta( $post_id, CPT_Manager::META_AUTHOR_PHOTO, isset( $row['author_photo'] ) ? (string) $row['author_photo'] : '' );
+		}
+
+		wp_suspend_cache_invalidation( false );
 	}
 
 	/**

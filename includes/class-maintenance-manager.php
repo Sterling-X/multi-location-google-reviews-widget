@@ -107,16 +107,14 @@ class Maintenance_Manager {
 	public static function render_dashboard_widget() {
 		global $wpdb;
 
-		$reviews_table   = $wpdb->prefix . 'mlgr_reviews';
 		$locations_table = $wpdb->prefix . 'mlgr_locations';
 
 		$total_reviews      = 0;
 		$latest_sync_status = 'N/A';
 		$latest_sync_time   = '';
 
-		if ( self::table_exists( $reviews_table ) ) {
-			$total_reviews = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$reviews_table}" );
-		}
+		$counts        = wp_count_posts( CPT_Manager::POST_TYPE );
+		$total_reviews = isset( $counts->publish ) ? (int) $counts->publish : 0;
 
 		if ( self::table_exists( $locations_table ) ) {
 			$latest = $wpdb->get_row(

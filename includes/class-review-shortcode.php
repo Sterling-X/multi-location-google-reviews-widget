@@ -40,31 +40,49 @@ class Review_Shortcode {
 	}
 
 	/**
+	 * Delete all cached shortcode transients from the database.
+	 *
+	 * Called after bulk review assignment or after a sync completes so stale
+	 * cached HTML is not served when the review set changes.
+	 *
+	 * @return void
+	 */
+	public static function flush_cache() {
+		global $wpdb;
+
+		$wpdb->query(
+			"DELETE FROM {$wpdb->options}
+			WHERE option_name LIKE '_transient_mlgr_shortcode_%'
+			   OR option_name LIKE '_transient_timeout_mlgr_shortcode_%'"
+		);
+	}
+
+	/**
 	 * Render shortcode output.
 	 *
 	 * @param array<string, mixed> $atts Shortcode attributes.
 	 * @return string
 	 */
 	public static function render( $atts ) {
-		global $wpdb;
-
 		$defaults = array(
-			'location_id' => 0,
-			'limit'       => 'all',
-			'min_rating'  => 0,
+			'location_id'     => 0,
+			'limit'           => 'all',
+			'min_rating'      => 0,
 			'exclude_ratings' => '',
-			'max_chars'   => self::DEFAULT_MAX_CHARS,
-			'layout'      => 'grid',
+			'max_chars'       => self::DEFAULT_MAX_CHARS,
+			'layout'          => 'grid',
+			'linked_to'       => '',
 		);
-		$atts     = shortcode_atts( $defaults, (array) $atts, self::SHORTCODE_TAG );
+		$atts = shortcode_atts( $defaults, (array) $atts, self::SHORTCODE_TAG );
 
-		$location_id = absint( $atts['location_id'] );
-		$limit       = self::normalize_limit( $atts['limit'] );
-		$min_rating  = is_numeric( $atts['min_rating'] ) ? (int) $atts['min_rating'] : 0;
+		$location_id     = absint( $atts['location_id'] );
+		$limit           = self::normalize_limit( $atts['limit'] );
+		$min_rating      = is_numeric( $atts['min_rating'] ) ? (int) $atts['min_rating'] : 0;
 		$exclude_ratings = self::normalize_exclude_ratings( $atts['exclude_ratings'] );
-		$max_chars   = self::normalize_max_chars( $atts['max_chars'] );
-		$layout      = self::normalize_layout( $atts['layout'] );
-		$cache_limit = null === $limit ? 'all' : $limit;
+		$max_chars       = self::normalize_max_chars( $atts['max_chars'] );
+		$layout          = self::normalize_layout( $atts['layout'] );
+		$linked_to       = sanitize_key( (string) $atts['linked_to'] );
+		$cache_limit     = null === $limit ? 'all' : $limit;
 
 		$min_rating = max( 0, min( 5, $min_rating ) );
 		$anonymize  = (bool) get_option( Admin_Settings_Page::ANONYMIZE_REVIEWERS_OPTION, false );
@@ -72,14 +90,15 @@ class Review_Shortcode {
 		$cache_key = 'mlgr_shortcode_' . md5(
 			wp_json_encode(
 				array(
-					'template'    => 'grid-widget-v8',
-					'location_id' => $location_id,
-					'limit'       => $cache_limit,
-					'min_rating'  => $min_rating,
+					'template'        => 'cpt-v2',
+					'location_id'     => $location_id,
+					'limit'           => $cache_limit,
+					'min_rating'      => $min_rating,
 					'exclude_ratings' => $exclude_ratings,
-					'max_chars'   => $max_chars,
-					'layout'      => $layout,
-					'anonymize'   => $anonymize,
+					'max_chars'       => $max_chars,
+					'layout'          => $layout,
+					'linked_to'       => $linked_to,
+					'anonymize'       => $anonymize,
 				)
 			)
 		);
@@ -89,61 +108,72 @@ class Review_Shortcode {
 			return $cached_html;
 		}
 
-		$reviews_table     = $wpdb->prefix . 'mlgr_reviews';
-		$locations_table   = $wpdb->prefix . 'mlgr_locations';
-		$review_url_column = self::resolve_review_url_column( $reviews_table );
+		$meta_query = array( 'relation' => 'AND' );
 
-		$where_parts = array(
-			'r.is_hidden = 0',
-			'r.rating >= %d',
-		);
-		$params      = array( $min_rating );
+		if ( $min_rating > 0 ) {
+			$meta_query[] = array(
+				'key'     => CPT_Manager::META_RATING,
+				'value'   => $min_rating,
+				'compare' => '>=',
+				'type'    => 'NUMERIC',
+			);
+		}
 
 		if ( ! empty( $exclude_ratings ) ) {
-			$placeholders = implode( ', ', array_fill( 0, count( $exclude_ratings ), '%d' ) );
-			$where_parts[] = "r.rating NOT IN ({$placeholders})";
-			$params        = array_merge( $params, $exclude_ratings );
+			$meta_query[] = array(
+				'key'     => CPT_Manager::META_RATING,
+				'value'   => $exclude_ratings,
+				'compare' => 'NOT IN',
+				'type'    => 'NUMERIC',
+			);
 		}
 
 		if ( $location_id > 0 ) {
-			$where_parts[] = 'r.location_id = %d';
-			$params[]      = $location_id;
+			$meta_query[] = array(
+				'key'   => CPT_Manager::META_LOCATION_ID,
+				'value' => $location_id,
+				'type'  => 'NUMERIC',
+			);
 		}
 
-		$select_fields = array(
-			'r.id',
-			'r.google_review_id',
-			'r.author_photo',
-			'r.author_name',
-			'r.rating',
-			'r.`text`',
-			'r.publish_date',
-			'l.google_place_id',
+		$query_args = array(
+			'post_type'      => CPT_Manager::POST_TYPE,
+			'post_status'    => 'publish',
+			'posts_per_page' => null !== $limit ? $limit : -1,
+			'orderby'        => 'date',
+			'order'          => 'DESC',
+			'no_found_rows'  => true,
 		);
 
-		if ( '' !== $review_url_column ) {
-			$select_fields[] = 'r.`' . $review_url_column . '` AS google_review_url';
+		if ( count( $meta_query ) > 1 ) {
+			$query_args['meta_query'] = $meta_query;
 		}
 
-		$sql = "SELECT
-					" . implode(
-			",
-					",
-			$select_fields
-		) . "
-			FROM {$reviews_table} r
-			LEFT JOIN {$locations_table} l ON l.id = r.location_id
-			WHERE " . implode( ' AND ', $where_parts ) . '
-			ORDER BY r.publish_date DESC, r.id DESC';
-
-		if ( null !== $limit ) {
-			$sql      .= ' LIMIT %d';
-			$params[] = $limit;
+		if ( '' !== $linked_to ) {
+			$query_args['tax_query'] = array(
+				array(
+					'taxonomy' => CPT_Manager::TAXONOMY,
+					'field'    => 'slug',
+					'terms'    => $linked_to,
+				),
+			);
 		}
 
-		$prepared_query = $wpdb->prepare( $sql, $params );
-		$reviews        = $wpdb->get_results( $prepared_query, ARRAY_A );
-		$reviews        = is_array( $reviews ) ? $reviews : array();
+		$query   = new WP_Query( $query_args );
+		$reviews = array();
+
+		foreach ( $query->posts as $post ) {
+			$reviews[] = array(
+				'id'                => $post->ID,
+				'google_review_id'  => (string) get_post_meta( $post->ID, CPT_Manager::META_GOOGLE_REVIEW_ID, true ),
+				'author_photo'      => (string) get_post_meta( $post->ID, CPT_Manager::META_AUTHOR_PHOTO, true ),
+				'author_name'       => $post->post_title,
+				'rating'            => (int) get_post_meta( $post->ID, CPT_Manager::META_RATING, true ),
+				'text'              => $post->post_content,
+				'publish_date'      => $post->post_date,
+				'google_review_url' => '',
+			);
+		}
 
 		$html = self::build_markup( $reviews, $anonymize, $max_chars, $layout );
 
@@ -312,59 +342,6 @@ class Review_Shortcode {
 	private static function normalize_layout( $raw_layout ) {
 		$layout = strtolower( trim( (string) $raw_layout ) );
 		return in_array( $layout, array( 'grid', 'slider', 'masonry' ), true ) ? $layout : 'grid';
-	}
-
-	/**
-	 * Resolve one available review URL column name, if present.
-	 *
-	 * @param string $reviews_table Reviews table name.
-	 * @return string
-	 */
-	private static function resolve_review_url_column( $reviews_table ) {
-		global $wpdb;
-
-		static $cache = array();
-
-		if ( isset( $cache[ $reviews_table ] ) ) {
-			return $cache[ $reviews_table ];
-		}
-
-		$safe_table = preg_replace( '/[^a-zA-Z0-9_]/', '', (string) $reviews_table );
-		if ( ! is_string( $safe_table ) || '' === $safe_table ) {
-			$cache[ $reviews_table ] = '';
-			return '';
-		}
-
-		$columns = $wpdb->get_col( "SHOW COLUMNS FROM `{$safe_table}`", 0 );
-		if ( ! is_array( $columns ) || empty( $columns ) ) {
-			$cache[ $reviews_table ] = '';
-			return '';
-		}
-
-		$normalized = array();
-		foreach ( $columns as $column_name ) {
-			if ( is_string( $column_name ) && '' !== trim( $column_name ) ) {
-				$normalized[] = strtolower( trim( $column_name ) );
-			}
-		}
-
-		$candidates = array(
-			'google_review_url',
-			'review_url',
-			'google_url',
-			'url',
-			'link',
-		);
-
-		foreach ( $candidates as $candidate ) {
-			if ( in_array( $candidate, $normalized, true ) ) {
-				$cache[ $reviews_table ] = $candidate;
-				return $candidate;
-			}
-		}
-
-		$cache[ $reviews_table ] = '';
-		return '';
 	}
 
 	/**

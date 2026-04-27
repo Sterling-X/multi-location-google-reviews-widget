@@ -30,6 +30,11 @@ class Admin_Settings_Page {
 	const TAB_SYNC_LOGS = 'sync-logs';
 
 	/**
+	 * Assign reviews tab slug.
+	 */
+	const TAB_ASSIGN = 'assign-reviews';
+
+	/**
 	 * Option key for reviewer anonymization.
 	 */
 	const ANONYMIZE_REVIEWERS_OPTION = 'mlgr_anonymize_reviewers';
@@ -45,6 +50,7 @@ class Admin_Settings_Page {
 		add_action( 'admin_post_mlgr_add_location', array( __CLASS__, 'handle_add_location' ) );
 		add_action( 'admin_post_mlgr_force_resync', array( __CLASS__, 'handle_force_resync' ) );
 		add_action( 'admin_post_mlgr_clear_logs', array( __CLASS__, 'handle_clear_logs' ) );
+		add_action( 'admin_post_mlgr_bulk_assign', array( __CLASS__, 'handle_bulk_assign' ) );
 	}
 
 	/**
@@ -83,6 +89,8 @@ class Admin_Settings_Page {
 				<?php self::render_welcome_tab(); ?>
 			<?php elseif ( self::TAB_SYNC_LOGS === $active_tab ) : ?>
 				<?php self::render_sync_logs_tab(); ?>
+			<?php elseif ( self::TAB_ASSIGN === $active_tab ) : ?>
+				<?php self::render_assign_tab(); ?>
 			<?php else : ?>
 				<?php
 				$api_key             = get_option( SerpApi_Fetcher::API_KEY_OPTION, '' );
@@ -105,6 +113,7 @@ class Admin_Settings_Page {
 		$tabs = array(
 			self::TAB_WELCOME   => 'Welcome',
 			self::TAB_LOCATIONS => 'Locations',
+			self::TAB_ASSIGN    => 'Assign Reviews',
 			self::TAB_SYNC_LOGS => 'Sync Logs',
 		);
 		?>
@@ -134,38 +143,66 @@ class Admin_Settings_Page {
 	 * @return void
 	 */
 	private static function render_welcome_tab() {
+		$assign_url    = add_query_arg( array( 'page' => self::PAGE_SLUG, 'tab' => self::TAB_ASSIGN ), admin_url( 'options-general.php' ) );
+		$locations_url = add_query_arg( array( 'page' => self::PAGE_SLUG, 'tab' => self::TAB_LOCATIONS ), admin_url( 'options-general.php' ) );
+		$taxonomy_url  = admin_url( 'edit-tags.php?taxonomy=' . CPT_Manager::TAXONOMY . '&post_type=' . CPT_Manager::POST_TYPE );
 		?>
 		<h2>Welcome</h2>
 		<p>
-			This plugin helps you sync and display Google reviews from one or many locations using SerpApi and a simple shortcode.
+			This plugin syncs Google reviews from one or many business locations via SerpApi and displays them on any page using shortcodes.
+			Reviews are stored as a WordPress custom post type (<code>mlgr_review</code>) so they can be tagged, filtered, and linked to any page or CPT post on your site.
 		</p>
 
 		<h3>Quick Start</h3>
 		<ol>
-			<li>Go to <strong>Locations</strong> and enter your <code>serpapi_key</code>.</li>
-			<li>Add one or more location IDs (Google Place ID or SerpApi Data ID).</li>
-			<li>Wait for sync, or click <strong>Force Resync</strong> for immediate refresh.</li>
-			<li>Place the shortcode on any page/post to render your reviews.</li>
+			<li>Go to <a href="<?php echo esc_url( $locations_url ); ?>"><strong>Locations</strong></a> and enter your SerpApi key.</li>
+			<li>Add one or more business locations using a Google Place ID or SerpApi Data ID.</li>
+			<li>Wait for the background sync to complete, or click <strong>Force Resync</strong> for an immediate refresh.</li>
+			<li>Place a shortcode on any page or post to display your reviews.</li>
 		</ol>
 
-		<h3>Shortcodes</h3>
+		<h3 style="margin-top: 28px;">Linking Reviews to People or Entities</h3>
 		<p>
-			Use <code>[ml_google_reviews]</code> for the review cards widget and <code>[ml_google_rating]</code> for a simple average rating summary.
+			Reviews can be attached to any page or CPT post on your site (e.g. an attorney, a doctor, a real estate agent) using the
+			<strong>Linked Posts</strong> taxonomy. This lets you display a specific person's reviews anywhere using the <code>linked_to</code> shortcode parameter.
 		</p>
+		<ol>
+			<li>
+				Go to <a href="<?php echo esc_url( $taxonomy_url ); ?>"><strong>Google Reviews &rarr; Linked Posts</strong></a> and create a term for each person or entity
+				(e.g. name: <em>Jane Doe</em>, slug: <em>jane-doe</em>). Optionally enter the WP post ID of their page to create a link.
+			</li>
+			<li>
+				Go to the <a href="<?php echo esc_url( $assign_url ); ?>"><strong>Assign Reviews</strong></a> tab, search for reviews mentioning that person,
+				and bulk-assign them to the term you just created.
+			</li>
+			<li>
+				Use the <code>linked_to</code> parameter in your shortcode to display only their reviews:
+				<br /><br />
+				<code>[ml_google_reviews linked_to="jane-doe"]</code>
+			</li>
+		</ol>
 
-		<h4 style="margin-top: 18px;">1) Reviews Widget: <code>[ml_google_reviews]</code></h4>
+		<h3 style="margin-top: 28px;">Shortcodes</h3>
+		<p>Two shortcodes are available: <code>[ml_google_reviews]</code> renders review cards and <code>[ml_google_rating]</code> renders a plain-text average rating summary.</p>
+
+		<h4 style="margin-top: 18px;">1) Reviews Widget &mdash; <code>[ml_google_reviews]</code></h4>
 		<table class="widefat striped">
 			<thead>
 				<tr>
-					<th style="width: 170px;">Parameter</th>
+					<th style="width: 180px;">Parameter</th>
 					<th>Description</th>
-					<th style="width: 330px;">Example</th>
+					<th style="width: 340px;">Example</th>
 				</tr>
 			</thead>
 			<tbody>
 				<tr>
+					<td><code>linked_to</code></td>
+					<td>Show only reviews tagged with this <strong>Linked Post</strong> term slug. Use this to display reviews for a specific person or entity.</td>
+					<td><code>[ml_google_reviews linked_to="jane-doe"]</code></td>
+				</tr>
+				<tr>
 					<td><code>location_id</code></td>
-					<td>Show reviews from one internal location ID only. Use <code>0</code> (default) to allow all locations.</td>
+					<td>Filter by internal location ID. Use <code>0</code> (default) to show reviews from all locations.</td>
 					<td><code>[ml_google_reviews location_id="3"]</code></td>
 				</tr>
 				<tr>
@@ -175,18 +212,18 @@ class Admin_Settings_Page {
 				</tr>
 				<tr>
 					<td><code>min_rating</code></td>
-					<td>Minimum rating threshold from <code>0</code> to <code>5</code>.</td>
+					<td>Minimum star rating to include. Accepts <code>0</code>&ndash;<code>5</code> (default <code>0</code>).</td>
 					<td><code>[ml_google_reviews min_rating="4"]</code></td>
 				</tr>
 				<tr>
 					<td><code>exclude_ratings</code></td>
-					<td>Comma-separated ratings to exclude (1-5). Example: <code>1,2,3</code> shows only 4 and 5-star reviews.</td>
+					<td>Comma-separated list of star ratings to exclude. <code>1,2,3</code> shows only 4- and 5-star reviews.</td>
 					<td><code>[ml_google_reviews exclude_ratings="1,2,3"]</code></td>
 				</tr>
 				<tr>
 					<td><code>max_chars</code></td>
-					<td>Text truncation length (used in grid/slider cards).</td>
-					<td><code>[ml_google_reviews max_chars="150"]</code></td>
+					<td>Character limit before review text is truncated. Minimum <code>60</code>, maximum <code>1000</code> (default <code>150</code>).</td>
+					<td><code>[ml_google_reviews max_chars="200"]</code></td>
 				</tr>
 				<tr>
 					<td><code>layout</code></td>
@@ -196,34 +233,43 @@ class Admin_Settings_Page {
 			</tbody>
 		</table>
 
-		<p style="margin-top:12px;">
-			Combined example:
-			<code>[ml_google_reviews layout="slider" location_id="2" limit="12" min_rating="3" exclude_ratings="1,2" max_chars="150"]</code>
+		<p style="margin-top: 12px;">
+			<strong>Combined example:</strong><br />
+			<code>[ml_google_reviews linked_to="jane-doe" layout="grid" min_rating="4" limit="6" max_chars="200"]</code>
 		</p>
 
-		<h4 style="margin-top: 22px;">2) Rating Summary: <code>[ml_google_rating]</code></h4>
+		<h4 style="margin-top: 26px;">2) Rating Summary &mdash; <code>[ml_google_rating]</code></h4>
+		<p>Renders a plain-text average rating, e.g. <em>4.7 / 5 based on 120 reviews</em>.</p>
 		<table class="widefat striped">
 			<thead>
 				<tr>
-					<th style="width: 170px;">Parameter</th>
+					<th style="width: 180px;">Parameter</th>
 					<th>Description</th>
-					<th style="width: 330px;">Example</th>
+					<th style="width: 340px;">Example</th>
 				</tr>
 			</thead>
 			<tbody>
 				<tr>
 					<td><code>location_id</code></td>
-					<td>Optional internal location ID. If omitted, the first location in the database is used.</td>
-					<td><code>[ml_google_rating location_id="3"]</code></td>
+					<td>Internal location ID. If omitted, the first location in the database is used.</td>
+					<td><code>[ml_google_rating location_id="2"]</code></td>
 				</tr>
 			</tbody>
 		</table>
 
-		<p style="margin-top:12px;">
-			Examples:
-			<code>[ml_google_rating]</code>
-			<br />
-			<code>[ml_google_rating location_id="2"]</code>
+		<p style="margin-top: 12px;">
+			<code>[ml_google_rating]</code> &nbsp;&nbsp; <code>[ml_google_rating location_id="2"]</code>
+		</p>
+
+		<h3 style="margin-top: 28px;">How Reviews Are Stored</h3>
+		<p>
+			Synced reviews are stored as <code>mlgr_review</code> WordPress posts. Each review holds the author name, review text, star rating,
+			reviewer photo, and the originating location as post meta. Business location operational data (sync status, average rating, total review count)
+			is kept in the <code>wp_mlgr_locations</code> database table.
+		</p>
+		<p>
+			The <strong>Linked Posts</strong> taxonomy (<code>mlgr_linked_post</code>) is used to tag reviews with any page or CPT post on your site.
+			Term slugs are the values you pass to the <code>linked_to</code> shortcode parameter.
 		</p>
 		<?php
 	}
@@ -633,7 +679,7 @@ class Admin_Settings_Page {
 	 */
 	private static function get_active_tab() {
 		$tab = isset( $_GET['tab'] ) ? sanitize_key( wp_unslash( $_GET['tab'] ) ) : self::TAB_WELCOME;
-		if ( ! in_array( $tab, array( self::TAB_WELCOME, self::TAB_LOCATIONS, self::TAB_SYNC_LOGS ), true ) ) {
+		if ( ! in_array( $tab, array( self::TAB_WELCOME, self::TAB_LOCATIONS, self::TAB_ASSIGN, self::TAB_SYNC_LOGS ), true ) ) {
 			return self::TAB_WELCOME;
 		}
 
@@ -666,6 +712,247 @@ class Admin_Settings_Page {
 	}
 
 	/**
+	 * Render the Assign Reviews tab.
+	 *
+	 * @return void
+	 */
+	private static function render_assign_tab() {
+		global $wpdb;
+
+		$search_term     = isset( $_GET['mlgr_s'] ) ? sanitize_text_field( wp_unslash( $_GET['mlgr_s'] ) ) : '';
+		$filter_location = isset( $_GET['mlgr_location'] ) ? absint( $_GET['mlgr_location'] ) : 0;
+
+		$linked_post_terms = get_terms(
+			array(
+				'taxonomy'   => CPT_Manager::TAXONOMY,
+				'hide_empty' => false,
+			)
+		);
+
+		$locations_table = $wpdb->prefix . 'mlgr_locations';
+		$locations       = $wpdb->get_results( "SELECT id, name, google_place_id FROM {$locations_table} ORDER BY id ASC", ARRAY_A );
+		$locations       = is_array( $locations ) ? $locations : array();
+
+		$query_args = array(
+			'post_type'      => CPT_Manager::POST_TYPE,
+			'post_status'    => array( 'publish', 'draft' ),
+			'posts_per_page' => 50,
+			'orderby'        => 'date',
+			'order'          => 'DESC',
+			'no_found_rows'  => false,
+		);
+
+		if ( '' !== $search_term ) {
+			$query_args['s'] = $search_term;
+		}
+
+		if ( $filter_location > 0 ) {
+			$query_args['meta_query'] = array(
+				array(
+					'key'   => CPT_Manager::META_LOCATION_ID,
+					'value' => $filter_location,
+					'type'  => 'NUMERIC',
+				),
+			);
+		}
+
+		$query = ( '' !== $search_term || $filter_location > 0 ) ? new WP_Query( $query_args ) : null;
+		?>
+		<h2>Assign Reviews</h2>
+		<p>
+			Search for reviews mentioning a specific person or topic, then assign them to a <strong>Linked Post</strong> term.
+			The term slug is used in the <code>linked_to</code> shortcode parameter, e.g. <code>[ml_google_reviews linked_to="jane-doe"]</code>.
+		</p>
+
+		<form method="get" action="<?php echo esc_url( admin_url( 'options-general.php' ) ); ?>">
+			<input type="hidden" name="page" value="<?php echo esc_attr( self::PAGE_SLUG ); ?>" />
+			<input type="hidden" name="tab" value="<?php echo esc_attr( self::TAB_ASSIGN ); ?>" />
+			<div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; margin-bottom:16px;">
+				<div>
+					<label for="mlgr_s" style="display:block; font-weight:600; margin-bottom:4px;">Search reviews</label>
+					<input type="text" id="mlgr_s" name="mlgr_s" value="<?php echo esc_attr( $search_term ); ?>" placeholder="e.g. Jane Doe" class="regular-text" />
+				</div>
+				<div>
+					<label for="mlgr_location" style="display:block; font-weight:600; margin-bottom:4px;">Location</label>
+					<select id="mlgr_location" name="mlgr_location">
+						<option value="0">All locations</option>
+						<?php foreach ( $locations as $loc ) : ?>
+							<option value="<?php echo esc_attr( (string) $loc['id'] ); ?>" <?php selected( $filter_location, (int) $loc['id'] ); ?>>
+								<?php echo esc_html( '' !== $loc['name'] ? $loc['name'] : $loc['google_place_id'] ); ?>
+							</option>
+						<?php endforeach; ?>
+					</select>
+				</div>
+				<?php submit_button( 'Search', 'secondary', 'mlgr_search_submit', false ); ?>
+			</div>
+		</form>
+
+		<?php if ( null !== $query ) : ?>
+			<p style="margin-bottom:10px;">
+				<?php echo esc_html( sprintf( 'Found %d review(s).', $query->found_posts ) ); ?>
+			</p>
+
+			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+				<input type="hidden" name="action" value="mlgr_bulk_assign" />
+				<input type="hidden" name="mlgr_s" value="<?php echo esc_attr( $search_term ); ?>" />
+				<input type="hidden" name="mlgr_location" value="<?php echo esc_attr( (string) $filter_location ); ?>" />
+				<?php wp_nonce_field( 'mlgr_bulk_assign', 'mlgr_bulk_assign_nonce' ); ?>
+
+				<table class="widefat striped">
+					<thead>
+						<tr>
+							<th style="width:30px;">
+								<input type="checkbox" id="mlgr-check-all" title="Select all" />
+							</th>
+							<th>Author</th>
+							<th style="width:80px;">Rating</th>
+							<th>Review Excerpt</th>
+							<th>Currently Assigned To</th>
+						</tr>
+					</thead>
+					<tbody>
+						<?php if ( empty( $query->posts ) ) : ?>
+							<tr>
+								<td colspan="5">No reviews found matching your search.</td>
+							</tr>
+						<?php else : ?>
+							<?php foreach ( $query->posts as $post ) :
+								$rating         = (int) get_post_meta( $post->ID, CPT_Manager::META_RATING, true );
+								$excerpt        = wp_trim_words( $post->post_content, 20, '...' );
+								$assigned_terms = wp_get_object_terms( $post->ID, CPT_Manager::TAXONOMY, array( 'fields' => 'slugs' ) );
+								$assigned_terms = is_array( $assigned_terms ) && ! is_wp_error( $assigned_terms ) ? $assigned_terms : array();
+								$stars          = str_repeat( '★', $rating ) . str_repeat( '☆', max( 0, 5 - $rating ) );
+							?>
+								<tr>
+									<td>
+										<input type="checkbox" name="review_ids[]" value="<?php echo esc_attr( (string) $post->ID ); ?>" />
+									</td>
+									<td><?php echo esc_html( $post->post_title ); ?></td>
+									<td style="color:#f5a623;" title="<?php echo esc_attr( (string) $rating . ' stars' ); ?>">
+										<?php echo esc_html( $stars ); ?>
+									</td>
+									<td><?php echo esc_html( $excerpt ); ?></td>
+									<td>
+										<?php if ( ! empty( $assigned_terms ) ) : ?>
+											<code><?php echo esc_html( implode( ', ', $assigned_terms ) ); ?></code>
+										<?php else : ?>
+											<span style="color:#999;">—</span>
+										<?php endif; ?>
+									</td>
+								</tr>
+							<?php endforeach; ?>
+						<?php endif; ?>
+					</tbody>
+				</table>
+
+				<?php if ( ! empty( $query->posts ) ) : ?>
+					<div style="margin-top:16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+						<label for="mlgr_assign_term" style="font-weight:600;">Assign selected to:</label>
+						<select id="mlgr_assign_term" name="term_slug">
+							<option value="">— select a linked post term —</option>
+							<?php if ( ! is_wp_error( $linked_post_terms ) && ! empty( $linked_post_terms ) ) : ?>
+								<?php foreach ( $linked_post_terms as $term ) : ?>
+									<option value="<?php echo esc_attr( $term->slug ); ?>">
+										<?php echo esc_html( $term->name . ' (' . $term->slug . ')' ); ?>
+									</option>
+								<?php endforeach; ?>
+							<?php endif; ?>
+						</select>
+						<?php submit_button( 'Assign Selected', 'primary', 'submit', false ); ?>
+					</div>
+
+					<?php if ( is_wp_error( $linked_post_terms ) || empty( $linked_post_terms ) ) : ?>
+						<p style="color:#d63638; margin-top:8px;">
+							No linked post terms exist yet.
+							<a href="<?php echo esc_url( admin_url( 'edit-tags.php?taxonomy=' . CPT_Manager::TAXONOMY . '&post_type=' . CPT_Manager::POST_TYPE ) ); ?>">
+								Create one first.
+							</a>
+						</p>
+					<?php endif; ?>
+				<?php endif; ?>
+			</form>
+		<?php endif; ?>
+
+		<script>
+		(function () {
+			var checkAll = document.getElementById( 'mlgr-check-all' );
+			if ( ! checkAll ) { return; }
+			checkAll.addEventListener( 'change', function () {
+				document.querySelectorAll( 'input[name="review_ids[]"]' ).forEach( function ( box ) {
+					box.checked = checkAll.checked;
+				} );
+			} );
+		}());
+		</script>
+		<?php
+	}
+
+	/**
+	 * Handle bulk term assignment for selected reviews.
+	 *
+	 * @return void
+	 */
+	public static function handle_bulk_assign() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( 'Unauthorized request.' );
+		}
+
+		check_admin_referer( 'mlgr_bulk_assign', 'mlgr_bulk_assign_nonce' );
+
+		$term_slug  = isset( $_POST['term_slug'] ) ? sanitize_key( wp_unslash( $_POST['term_slug'] ) ) : '';
+		$review_ids = isset( $_POST['review_ids'] ) && is_array( $_POST['review_ids'] )
+			? array_map( 'absint', $_POST['review_ids'] )
+			: array();
+		$search     = isset( $_POST['mlgr_s'] ) ? sanitize_text_field( wp_unslash( $_POST['mlgr_s'] ) ) : '';
+		$location   = isset( $_POST['mlgr_location'] ) ? absint( $_POST['mlgr_location'] ) : 0;
+
+		if ( '' === $term_slug ) {
+			self::redirect_with_notice( 'Please select a linked post term.', 'error', self::TAB_ASSIGN );
+		}
+
+		$term = get_term_by( 'slug', $term_slug, CPT_Manager::TAXONOMY );
+		if ( ! $term || is_wp_error( $term ) ) {
+			self::redirect_with_notice( 'The selected term does not exist.', 'error', self::TAB_ASSIGN );
+		}
+
+		if ( empty( $review_ids ) ) {
+			self::redirect_with_notice( 'No reviews were selected.', 'error', self::TAB_ASSIGN );
+		}
+
+		$count = 0;
+		foreach ( $review_ids as $post_id ) {
+			if ( $post_id <= 0 ) {
+				continue;
+			}
+			$post = get_post( $post_id );
+			if ( ! $post || CPT_Manager::POST_TYPE !== $post->post_type ) {
+				continue;
+			}
+			$result = wp_set_object_terms( $post_id, $term_slug, CPT_Manager::TAXONOMY, true );
+			if ( ! is_wp_error( $result ) ) {
+				++$count;
+			}
+		}
+
+		Review_Shortcode::flush_cache();
+
+		$redirect_url = add_query_arg(
+			array(
+				'page'             => self::PAGE_SLUG,
+				'tab'              => self::TAB_ASSIGN,
+				'mlgr_notice'      => sprintf( '%d review(s) assigned to "%s".', $count, $term->name ),
+				'mlgr_notice_type' => 'success',
+				'mlgr_s'           => rawurlencode( $search ),
+				'mlgr_location'    => $location,
+			),
+			admin_url( 'options-general.php' )
+		);
+
+		wp_safe_redirect( $redirect_url );
+		exit;
+	}
+
+	/**
 	 * Redirect back to settings page with a notice.
 	 *
 	 * @param string $message Notice message.
@@ -675,7 +962,7 @@ class Admin_Settings_Page {
 	 */
 	private static function redirect_with_notice( $message, $type, $tab = self::TAB_LOCATIONS ) {
 		$tab = sanitize_key( $tab );
-		if ( ! in_array( $tab, array( self::TAB_WELCOME, self::TAB_LOCATIONS, self::TAB_SYNC_LOGS ), true ) ) {
+		if ( ! in_array( $tab, array( self::TAB_WELCOME, self::TAB_LOCATIONS, self::TAB_ASSIGN, self::TAB_SYNC_LOGS ), true ) ) {
 			$tab = self::TAB_LOCATIONS;
 		}
 
