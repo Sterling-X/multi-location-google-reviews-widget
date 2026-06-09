@@ -1,6 +1,16 @@
 <?php
 /**
  * Asynchronous review synchronization using Action Scheduler.
+ *
+ * Sync flow:
+ *   1. Initial add  (cursor = null, no force_scrape):
+ *      Check if scraper already has the place → import directly.
+ *      If not found → trigger scrape job → schedule job status checks.
+ *   2. Force resync / scheduled sync (cursor has force_scrape = true):
+ *      Always trigger a fresh scrape job → schedule job status checks.
+ *   3. Job polling  (cursor has job_id):
+ *      Poll GET /jobs/{job_id} every JOB_POLL_INTERVAL_SECONDS seconds.
+ *      On completion → import all reviews from scraper → mark done.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -20,7 +30,7 @@ class Review_Syncer {
 	const SYNC_GROUP = 'mlgr';
 
 	/**
-	 * Option key for storing per-location sync errors.
+	 * Option key for per-location sync errors.
 	 */
 	const ERROR_LOG_OPTION = 'mlgr_sync_error_log';
 
@@ -30,12 +40,17 @@ class Review_Syncer {
 	const MAX_ERROR_MESSAGE_LENGTH = 500;
 
 	/**
-	 * Delay before fetching the next paginated SerpApi page.
+	 * Option key for star ratings excluded from sync.
 	 */
-	const NEXT_PAGE_DELAY_SECONDS = 15;
+	const EXCLUDED_RATINGS_OPTION = 'mlgr_sync_excluded_ratings';
 
 	/**
-	 * Register hooks.
+	 * Seconds between scrape job status polls.
+	 */
+	const JOB_POLL_INTERVAL_SECONDS = 30;
+
+	/**
+	 * Register Action Scheduler hook.
 	 *
 	 * @return void
 	 */
@@ -44,7 +59,10 @@ class Review_Syncer {
 	}
 
 	/**
-	 * Start a location sync from page 1.
+	 * Schedule an initial sync for a newly added location.
+	 *
+	 * Checks whether the scraper already has this place and imports directly
+	 * if found; otherwise triggers a new scrape job.
 	 *
 	 * @param int $location_id Location table ID.
 	 * @return int|false
@@ -54,13 +72,25 @@ class Review_Syncer {
 	}
 
 	/**
-	 * Process one page of review synchronization.
+	 * Schedule a forced re-scrape for an existing location.
 	 *
-	 * @param int               $location_id     Internal location ID.
-	 * @param string|array|null $next_page_token Pagination cursor for next page.
+	 * Always triggers a fresh scrape regardless of cached scraper data.
+	 *
+	 * @param int $location_id Location table ID.
+	 * @return int|false
+	 */
+	public static function schedule_resync( $location_id ) {
+		return self::schedule_sync_action( $location_id, array( 'force_scrape' => true ), 0 );
+	}
+
+	/**
+	 * Process one step of the location sync state machine.
+	 *
+	 * @param int               $location_id Internal location ID.
+	 * @param string|array|null $cursor      Sync state cursor.
 	 * @return void
 	 */
-	public static function process_sync( $location_id, $next_page_token = null ) {
+	public static function process_sync( $location_id, $cursor = null ) {
 		global $wpdb;
 
 		$location_id = absint( $location_id );
@@ -69,42 +99,113 @@ class Review_Syncer {
 		}
 
 		$locations_table = $wpdb->prefix . 'mlgr_locations';
-
-		$location = $wpdb->get_row(
+		$location        = $wpdb->get_row(
 			$wpdb->prepare(
-				"SELECT id, google_place_id FROM {$locations_table} WHERE id = %d LIMIT 1",
+				"SELECT id, google_place_id, name FROM {$locations_table} WHERE id = %d LIMIT 1",
 				$location_id
 			),
 			ARRAY_A
 		);
 
 		if ( empty( $location['google_place_id'] ) ) {
-			self::record_sync_error( $location_id, 'Location is missing a Google Place ID / Data ID.' );
+			self::record_sync_error( $location_id, 'Location is missing a Google Maps URL.' );
 			return;
 		}
 
 		self::update_location_status( $location_id, 'active' );
 		self::clear_sync_error( $location_id );
 
-		$cursor             = self::normalize_sync_cursor( $next_page_token );
-		$request_location   = '' !== $cursor['location_ref'] ? $cursor['location_ref'] : (string) $location['google_place_id'];
-		$request_page_token = $cursor['next_page_token'];
-		$request_next_url   = $cursor['next_request_url'];
+		$maps_url = (string) $location['google_place_id'];
+		$fetcher  = new Scraper_Fetcher();
+		$cursor   = self::normalize_sync_cursor( $cursor );
 
-		$fetcher  = new SerpApi_Fetcher();
-		$response = $fetcher->fetch_reviews( $request_location, $request_page_token, $location_id, $request_next_url );
+		// ── Phase: Job polling ────────────────────────────────────────────────
+		if ( '' !== $cursor['job_id'] ) {
+			$status_result = $fetcher->get_job_status( $cursor['job_id'], $location_id );
+
+			if ( ! empty( $status_result['error'] ) ) {
+				self::record_sync_error( $location_id, (string) $status_result['error'] );
+				return;
+			}
+
+			$job_status = (string) $status_result['status'];
+
+			if ( in_array( $job_status, array( 'pending', 'running' ), true ) ) {
+				self::schedule_sync_action(
+					$location_id,
+					array( 'job_id' => $cursor['job_id'] ),
+					self::JOB_POLL_INTERVAL_SECONDS
+				);
+				return;
+			}
+
+			if ( 'completed' !== $job_status ) {
+				self::record_sync_error(
+					$location_id,
+					'Scrape job ended with unexpected status: ' . $job_status . '.',
+					array( 'job_id' => $cursor['job_id'] )
+				);
+				return;
+			}
+
+			// Job complete — locate the place and import.
+			$place = $fetcher->find_place_by_url( $maps_url );
+			if ( ! is_array( $place ) || empty( $place['place_id'] ) ) {
+				self::record_sync_error( $location_id, 'Scrape completed but place not found in scraper API.' );
+				return;
+			}
+
+			self::import_place_reviews( $location_id, (string) $place['place_id'], $place, $fetcher );
+			return;
+		}
+
+		// ── Phase: Initial add or force resync ───────────────────────────────
+		if ( ! $cursor['force_scrape'] ) {
+			// Check whether the scraper already has data for this URL (e.g. we
+			// just ran the scraper manually before adding the location to WP).
+			$place = $fetcher->find_place_by_url( $maps_url );
+			if ( is_array( $place ) && ! empty( $place['place_id'] ) ) {
+				self::import_place_reviews( $location_id, (string) $place['place_id'], $place, $fetcher );
+				return;
+			}
+		}
+
+		// Trigger a fresh scrape job.
+		$scrape_result = $fetcher->trigger_scrape( $maps_url, $location_id );
+		if ( ! empty( $scrape_result['error'] ) ) {
+			self::record_sync_error( $location_id, (string) $scrape_result['error'] );
+			return;
+		}
+
+		self::schedule_sync_action(
+			$location_id,
+			array( 'job_id' => $scrape_result['job_id'] ),
+			self::JOB_POLL_INTERVAL_SECONDS
+		);
+	}
+
+	/**
+	 * Fetch reviews from the scraper and save them to WordPress.
+	 *
+	 * Also updates the location name and rating summary.
+	 *
+	 * @param int            $location_id Internal location ID.
+	 * @param string         $place_id    Scraper place_id.
+	 * @param array          $place       Place data from find_place_by_url().
+	 * @param Scraper_Fetcher $fetcher    Fetcher instance.
+	 * @return void
+	 */
+	private static function import_place_reviews( $location_id, $place_id, $place, $fetcher ) {
+		// Update location display name from scraper.
+		$place_name = isset( $place['place_name'] ) ? (string) $place['place_name'] : '';
+		if ( '' !== $place_name ) {
+			self::update_location_name( $location_id, $place_name );
+		}
+
+		$response = $fetcher->fetch_reviews( $place_id, $location_id );
 
 		if ( ! empty( $response['error'] ) ) {
-			self::record_sync_error(
-				$location_id,
-				(string) $response['error'],
-				array(
-					'stage'            => 'fetch_reviews',
-					'location_ref'     => $request_location,
-					'next_page_token'  => is_string( $request_page_token ) ? $request_page_token : '',
-					'next_request_url' => is_string( $request_next_url ) ? $request_next_url : '',
-				)
-			);
+			self::record_sync_error( $location_id, (string) $response['error'] );
 			return;
 		}
 
@@ -121,7 +222,6 @@ class Review_Syncer {
 				$saved = self::upsert_review( $location_id, $review );
 				if ( ! $saved ) {
 					wp_suspend_cache_invalidation( false );
-
 					self::record_sync_error(
 						$location_id,
 						'Failed saving a review post.',
@@ -134,46 +234,18 @@ class Review_Syncer {
 			wp_suspend_cache_invalidation( false );
 		}
 
-		if ( ! empty( $response['next_page_token'] ) && is_string( $response['next_page_token'] ) ) {
-			$next_cursor = array(
-				'next_page_token' => (string) $response['next_page_token'],
-				'location_ref'    => self::first_non_empty(
-					isset( $response['next_location_ref'] ) && is_string( $response['next_location_ref'] ) ? $response['next_location_ref'] : '',
-					isset( $response['request_location_ref'] ) && is_string( $response['request_location_ref'] ) ? $response['request_location_ref'] : '',
-					$request_location
-				),
-				'next_request_url' => self::first_non_empty(
-					isset( $response['next_request_url'] ) && is_string( $response['next_request_url'] ) ? $response['next_request_url'] : '',
-					$request_next_url
-				),
-			);
-
-			$scheduled = self::schedule_sync_action( $location_id, $next_cursor, self::NEXT_PAGE_DELAY_SECONDS );
-			if ( false === $scheduled ) {
-				self::record_sync_error(
-					$location_id,
-					'Failed to schedule the next sync page.',
-					array(
-						'stage'       => 'schedule_next_page',
-						'next_cursor' => $next_cursor,
-					)
-				);
-			}
-			return;
-		}
-
 		self::mark_sync_completed( $location_id );
 	}
 
 	/**
-	 * Schedule one sync job.
+	 * Schedule one sync action.
 	 *
-	 * @param int               $location_id     Internal location ID.
-	 * @param string|array|null $next_page_token Pagination cursor.
-	 * @param int               $delay_seconds   Delay before execution.
+	 * @param int               $location_id   Internal location ID.
+	 * @param string|array|null $cursor        Sync state cursor.
+	 * @param int               $delay_seconds Delay before execution.
 	 * @return int|false
 	 */
-	private static function schedule_sync_action( $location_id, $next_page_token, $delay_seconds ) {
+	private static function schedule_sync_action( $location_id, $cursor, $delay_seconds ) {
 		$location_id = absint( $location_id );
 		if ( $location_id <= 0 ) {
 			return false;
@@ -184,21 +256,24 @@ class Review_Syncer {
 			return false;
 		}
 
-		$cursor = self::normalize_sync_cursor( $next_page_token );
-		$args   = array(
+		$normalized = self::normalize_sync_cursor( $cursor );
+		$args       = array(
 			$location_id,
-			( null !== $cursor['next_page_token'] || '' !== $cursor['location_ref'] || '' !== $cursor['next_request_url'] ) ? $cursor : null,
+			( '' !== $normalized['job_id'] || $normalized['force_scrape'] ) ? $normalized : null,
 		);
 
-		$action_id = as_schedule_single_action( time() + max( 0, absint( $delay_seconds ) ), self::SYNC_ACTION, $args, self::SYNC_GROUP );
+		$action_id = as_schedule_single_action(
+			time() + max( 0, absint( $delay_seconds ) ),
+			self::SYNC_ACTION,
+			$args,
+			self::SYNC_GROUP
+		);
+
 		if ( false === $action_id ) {
 			self::record_sync_error(
 				$location_id,
 				'Action Scheduler failed to queue sync action.',
-				array(
-					'stage'       => 'schedule_sync_action',
-					'next_cursor' => $cursor,
-				)
+				array( 'cursor' => $normalized )
 			);
 		}
 
@@ -206,61 +281,40 @@ class Review_Syncer {
 	}
 
 	/**
-	 * Normalize pagination cursor from string/array formats.
+	 * Normalize a sync cursor from any format into a canonical array.
 	 *
-	 * @param mixed $cursor Raw cursor.
-	 * @return array{next_page_token: string|null, location_ref: string, next_request_url: string}
+	 * @param mixed $cursor Raw cursor value.
+	 * @return array{job_id: string, force_scrape: bool}
 	 */
 	private static function normalize_sync_cursor( $cursor ) {
 		$normalized = array(
-			'next_page_token' => null,
-			'location_ref'    => '',
-			'next_request_url' => '',
+			'job_id'      => '',
+			'force_scrape' => false,
 		);
-
-		if ( is_string( $cursor ) ) {
-			$token = trim( $cursor );
-			if ( '' !== $token ) {
-				$normalized['next_page_token'] = $token;
-			}
-			return $normalized;
-		}
 
 		if ( ! is_array( $cursor ) ) {
 			return $normalized;
 		}
 
-		$token = '';
-		if ( isset( $cursor['next_page_token'] ) && is_scalar( $cursor['next_page_token'] ) ) {
-			$token = trim( (string) $cursor['next_page_token'] );
-		}
-
-		if ( '' !== $token ) {
-			$normalized['next_page_token'] = $token;
-		}
-
-		if ( isset( $cursor['location_ref'] ) && is_scalar( $cursor['location_ref'] ) ) {
-			$location_ref = trim( (string) $cursor['location_ref'] );
-			if ( '' !== $location_ref ) {
-				$normalized['location_ref'] = $location_ref;
+		if ( isset( $cursor['job_id'] ) && is_scalar( $cursor['job_id'] ) ) {
+			$job_id = trim( (string) $cursor['job_id'] );
+			if ( '' !== $job_id ) {
+				$normalized['job_id'] = $job_id;
 			}
 		}
 
-		if ( isset( $cursor['next_request_url'] ) && is_scalar( $cursor['next_request_url'] ) ) {
-			$next_request_url = trim( (string) $cursor['next_request_url'] );
-			if ( '' !== $next_request_url ) {
-				$normalized['next_request_url'] = $next_request_url;
-			}
+		if ( ! empty( $cursor['force_scrape'] ) ) {
+			$normalized['force_scrape'] = true;
 		}
 
 		return $normalized;
 	}
 
 	/**
-	 * Insert or update one mlgr_review CPT post by google_review_id.
+	 * Insert or update one mlgr_review CPT post, deduplicated by google_review_id.
 	 *
 	 * @param int   $location_id Internal location ID.
-	 * @param mixed $review      Review payload from SerpApi.
+	 * @param mixed $review      Normalized review array from Scraper_Fetcher.
 	 * @return bool
 	 */
 	private static function upsert_review( $location_id, $review ) {
@@ -292,6 +346,11 @@ class Review_Syncer {
 		$rating = self::array_get( $review, array( 'rating' ) );
 		$rating = is_numeric( $rating ) ? max( 0, min( 5, (int) $rating ) ) : 0;
 
+		$excluded_ratings = (array) get_option( self::EXCLUDED_RATINGS_OPTION, array() );
+		if ( ! empty( $excluded_ratings ) && in_array( $rating, array_map( 'intval', $excluded_ratings ), true ) ) {
+			return true;
+		}
+
 		$text = self::first_non_empty(
 			self::array_get( $review, array( 'snippet' ) ),
 			self::array_get( $review, array( 'text' ) ),
@@ -306,8 +365,7 @@ class Review_Syncer {
 			)
 		);
 
-		$is_hidden   = ! empty( self::array_get( $review, array( 'is_hidden' ) ) );
-		$post_status = $is_hidden ? 'draft' : 'publish';
+		$post_status = ( $rating >= 4 ) ? 'publish' : 'draft';
 		$post_date   = null !== $publish_date ? $publish_date : current_time( 'mysql' );
 
 		$existing_id = CPT_Manager::get_review_post_by_google_id( $google_review_id );
@@ -342,7 +400,32 @@ class Review_Syncer {
 	}
 
 	/**
-	 * Mark location sync as completed and store last sync datetime.
+	 * Update the location display name after a successful scrape.
+	 *
+	 * @param int    $location_id Location ID.
+	 * @param string $name        Resolved place name from scraper.
+	 * @return void
+	 */
+	private static function update_location_name( $location_id, $name ) {
+		global $wpdb;
+
+		$name = trim( (string) $name );
+		if ( '' === $name ) {
+			return;
+		}
+
+		$locations_table = $wpdb->prefix . 'mlgr_locations';
+		$wpdb->update(
+			$locations_table,
+			array( 'name' => $name ),
+			array( 'id' => absint( $location_id ) ),
+			array( '%s' ),
+			array( '%d' )
+		);
+	}
+
+	/**
+	 * Mark location sync as completed.
 	 *
 	 * @param int $location_id Location ID.
 	 * @return void
@@ -351,7 +434,6 @@ class Review_Syncer {
 		global $wpdb;
 
 		$locations_table = $wpdb->prefix . 'mlgr_locations';
-
 		$wpdb->update(
 			$locations_table,
 			array(
@@ -386,11 +468,7 @@ class Review_Syncer {
 	public static function get_location_error( $location_id ) {
 		$location_id = absint( $location_id );
 		if ( $location_id <= 0 ) {
-			return array(
-				'message' => '',
-				'time'    => '',
-				'context' => '',
-			);
+			return array( 'message' => '', 'time' => '', 'context' => '' );
 		}
 
 		$errors = self::get_error_log();
@@ -444,15 +522,10 @@ class Review_Syncer {
 		global $wpdb;
 
 		$locations_table = $wpdb->prefix . 'mlgr_locations';
-
 		$wpdb->update(
 			$locations_table,
-			array(
-				'sync_status' => $status,
-			),
-			array(
-				'id' => absint( $location_id ),
-			),
+			array( 'sync_status' => $status ),
+			array( 'id' => absint( $location_id ) ),
 			array( '%s' ),
 			array( '%d' )
 		);
@@ -461,8 +534,8 @@ class Review_Syncer {
 	/**
 	 * Persist location-level average rating and total review count.
 	 *
-	 * @param int        $location_id    Location ID.
-	 * @param float|int|null $average_rating Average rating value.
+	 * @param int             $location_id    Location ID.
+	 * @param float|int|null  $average_rating Average rating value.
 	 * @param int|string|null $total_reviews  Total reviews value.
 	 * @return void
 	 */
@@ -478,8 +551,7 @@ class Review_Syncer {
 		$formats = array();
 
 		if ( is_numeric( $average_rating ) ) {
-			$rating = (float) $average_rating;
-			$rating = max( 0.0, min( 5.0, $rating ) );
+			$rating                  = max( 0.0, min( 5.0, (float) $average_rating ) );
 			$fields['average_rating'] = round( $rating, 1 );
 			$formats[]               = '%f';
 		}
@@ -497,9 +569,7 @@ class Review_Syncer {
 		$wpdb->update(
 			$locations_table,
 			$fields,
-			array(
-				'id' => $location_id,
-			),
+			array( 'id' => $location_id ),
 			$formats,
 			array( '%d' )
 		);
@@ -530,7 +600,7 @@ class Review_Syncer {
 			$context_message = self::sanitize_error_text( false !== $encoded ? $encoded : '' );
 		}
 
-		$errors               = self::get_error_log();
+		$errors                      = self::get_error_log();
 		$errors[ (string) $location_id ] = array(
 			'message' => $error_message,
 			'time'    => current_time( 'mysql' ),
@@ -541,18 +611,17 @@ class Review_Syncer {
 		self::update_location_status( $location_id, 'error' );
 
 		if ( function_exists( 'error_log' ) ) {
-			$log_line = sprintf(
+			error_log( sprintf( // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 				'[MLGR] Location %d sync error: %s%s',
 				$location_id,
 				$error_message,
 				'' !== $context_message ? ' | context=' . $context_message : ''
-			);
-			error_log( $log_line ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+			) );
 		}
 	}
 
 	/**
-	 * Convert a value into a trimmed error string.
+	 * Convert a value into a trimmed, capped error string.
 	 *
 	 * @param mixed $value Value to sanitize.
 	 * @return string

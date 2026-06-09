@@ -56,6 +56,12 @@ class CPT_Manager {
 		add_action( 'mlgr_linked_post_edit_form_fields', array( __CLASS__, 'render_term_edit_field' ) );
 		add_action( 'created_mlgr_linked_post', array( __CLASS__, 'save_term_meta' ) );
 		add_action( 'edited_mlgr_linked_post',  array( __CLASS__, 'save_term_meta' ) );
+
+		add_filter( 'manage_' . self::POST_TYPE . '_posts_columns',        array( __CLASS__, 'add_rating_column' ) );
+		add_action( 'manage_' . self::POST_TYPE . '_posts_custom_column',   array( __CLASS__, 'render_rating_column' ), 10, 2 );
+		add_filter( 'manage_edit-' . self::POST_TYPE . '_sortable_columns', array( __CLASS__, 'rating_sortable_column' ) );
+		add_action( 'pre_get_posts', array( __CLASS__, 'sort_by_rating' ) );
+		add_action( 'add_meta_boxes', array( __CLASS__, 'register_rating_meta_box' ) );
 	}
 
 	/**
@@ -199,6 +205,111 @@ class CPT_Manager {
 		} else {
 			delete_term_meta( $term_id, self::TERM_META_LINKED_POST_ID );
 		}
+	}
+
+	/**
+	 * Insert a Rating column after the Title column in the review list table.
+	 *
+	 * @param array $columns Existing columns.
+	 * @return array
+	 */
+	public static function add_rating_column( $columns ) {
+		$new = array();
+		foreach ( $columns as $key => $label ) {
+			$new[ $key ] = $label;
+			if ( 'title' === $key ) {
+				$new['mlgr_rating'] = 'Rating';
+			}
+		}
+		return $new;
+	}
+
+	/**
+	 * Render star rating in the Rating column.
+	 *
+	 * @param string $column  Column slug.
+	 * @param int    $post_id Post ID.
+	 * @return void
+	 */
+	public static function render_rating_column( $column, $post_id ) {
+		if ( 'mlgr_rating' !== $column ) {
+			return;
+		}
+
+		$rating = (int) get_post_meta( $post_id, self::META_RATING, true );
+		$stars  = str_repeat( '★', $rating ) . str_repeat( '☆', max( 0, 5 - $rating ) );
+
+		printf(
+			'<span style="color:#f5a623;font-size:15px;" title="%s">%s</span> <span style="color:#888;font-size:11px;">(%d)</span>',
+			esc_attr( $rating . ' out of 5' ),
+			esc_html( $stars ),
+			$rating
+		);
+	}
+
+	/**
+	 * Make the Rating column sortable.
+	 *
+	 * @param array $sortable Existing sortable columns.
+	 * @return array
+	 */
+	public static function rating_sortable_column( $sortable ) {
+		$sortable['mlgr_rating'] = 'mlgr_rating';
+		return $sortable;
+	}
+
+	/**
+	 * Apply meta_value_num ordering when sorting by rating.
+	 *
+	 * @param WP_Query $query Current query.
+	 * @return void
+	 */
+	public static function sort_by_rating( $query ) {
+		if ( ! is_admin() || ! $query->is_main_query() ) {
+			return;
+		}
+		if ( self::POST_TYPE !== $query->get( 'post_type' ) ) {
+			return;
+		}
+		if ( 'mlgr_rating' === $query->get( 'orderby' ) ) {
+			$query->set( 'meta_key', self::META_RATING );
+			$query->set( 'orderby', 'meta_value_num' );
+		}
+	}
+
+	/**
+	 * Register the Rating meta box on the edit review screen.
+	 *
+	 * @return void
+	 */
+	public static function register_rating_meta_box() {
+		add_meta_box(
+			'mlgr_rating_meta_box',
+			'Rating',
+			array( __CLASS__, 'render_rating_meta_box' ),
+			self::POST_TYPE,
+			'side',
+			'high'
+		);
+	}
+
+	/**
+	 * Render read-only star rating inside the meta box.
+	 *
+	 * @param WP_Post $post Current post.
+	 * @return void
+	 */
+	public static function render_rating_meta_box( $post ) {
+		$rating = (int) get_post_meta( $post->ID, self::META_RATING, true );
+		$stars  = str_repeat( '★', $rating ) . str_repeat( '☆', max( 0, 5 - $rating ) );
+		?>
+		<p style="font-size:22px; color:#f5a623; margin:4px 0 2px;">
+			<?php echo esc_html( $stars ); ?>
+		</p>
+		<p style="margin:0; color:#555;">
+			<?php echo esc_html( $rating . ' out of 5' ); ?>
+		</p>
+		<?php
 	}
 
 	/**

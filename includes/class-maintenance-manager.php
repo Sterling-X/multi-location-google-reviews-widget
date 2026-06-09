@@ -10,9 +10,14 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Maintenance_Manager {
 
 	/**
-	 * WP-Cron hook for daily location resync.
+	 * WP-Cron hook for automatic location resync.
 	 */
-	const DAILY_SYNC_HOOK = 'mlgr_daily_sync_locations';
+	const SYNC_HOOK = 'mlgr_daily_sync_locations';
+
+	/**
+	 * Option key storing the admin-selected sync recurrence.
+	 */
+	const SYNC_FREQUENCY_OPTION = 'mlgr_sync_frequency';
 
 	/**
 	 * Register runtime hooks.
@@ -20,9 +25,30 @@ class Maintenance_Manager {
 	 * @return void
 	 */
 	public static function init() {
-		add_action( self::DAILY_SYNC_HOOK, array( __CLASS__, 'run_daily_sync' ) );
+		add_filter( 'cron_schedules',     array( __CLASS__, 'add_cron_schedules' ) );
+		add_action( self::SYNC_HOOK,      array( __CLASS__, 'run_sync' ) );
 		add_action( 'wp_dashboard_setup', array( __CLASS__, 'register_dashboard_widget' ) );
-		add_action( 'init', array( __CLASS__, 'maybe_schedule_daily_sync' ) );
+		add_action( 'init',               array( __CLASS__, 'maybe_schedule_sync' ) );
+	}
+
+	/**
+	 * Register custom cron recurrences.
+	 *
+	 * @param array $schedules Existing schedules.
+	 * @return array
+	 */
+	public static function add_cron_schedules( $schedules ) {
+		if ( ! isset( $schedules['weekly'] ) ) {
+			$schedules['weekly'] = array(
+				'interval' => WEEK_IN_SECONDS,
+				'display'  => 'Once Weekly',
+			);
+		}
+		$schedules['monthly'] = array(
+			'interval' => 30 * DAY_IN_SECONDS,
+			'display'  => 'Once Monthly',
+		);
+		return $schedules;
 	}
 
 	/**
@@ -31,7 +57,7 @@ class Maintenance_Manager {
 	 * @return void
 	 */
 	public static function activate() {
-		self::maybe_schedule_daily_sync();
+		self::maybe_schedule_sync();
 	}
 
 	/**
@@ -40,31 +66,60 @@ class Maintenance_Manager {
 	 * @return void
 	 */
 	public static function deactivate() {
-		$timestamp = wp_next_scheduled( self::DAILY_SYNC_HOOK );
+		self::unschedule_sync();
+	}
 
+	/**
+	 * Ensure the cron event exists with the correct recurrence.
+	 * Unschedules any existing event if the frequency has changed.
+	 *
+	 * @return void
+	 */
+	public static function maybe_schedule_sync() {
+		$frequency = (string) get_option( self::SYNC_FREQUENCY_OPTION, 'monthly' );
+
+		if ( 'manual' === $frequency ) {
+			self::unschedule_sync();
+			return;
+		}
+
+		$timestamp = wp_next_scheduled( self::SYNC_HOOK );
+		if ( $timestamp ) {
+			foreach ( (array) _get_cron_array() as $cron_events ) {
+				if ( ! isset( $cron_events[ self::SYNC_HOOK ] ) ) {
+					continue;
+				}
+				foreach ( $cron_events[ self::SYNC_HOOK ] as $event ) {
+					if ( isset( $event['schedule'] ) && $event['schedule'] === $frequency ) {
+						return;
+					}
+				}
+			}
+			self::unschedule_sync();
+		}
+
+		wp_schedule_event( time() + MINUTE_IN_SECONDS, $frequency, self::SYNC_HOOK );
+	}
+
+	/**
+	 * Unschedule all pending instances of the sync hook.
+	 *
+	 * @return void
+	 */
+	private static function unschedule_sync() {
+		$timestamp = wp_next_scheduled( self::SYNC_HOOK );
 		while ( false !== $timestamp ) {
-			wp_unschedule_event( $timestamp, self::DAILY_SYNC_HOOK );
-			$timestamp = wp_next_scheduled( self::DAILY_SYNC_HOOK );
+			wp_unschedule_event( $timestamp, self::SYNC_HOOK );
+			$timestamp = wp_next_scheduled( self::SYNC_HOOK );
 		}
 	}
 
 	/**
-	 * Ensure the daily cron event exists.
+	 * Cron job: queue a fresh sync for every location.
 	 *
 	 * @return void
 	 */
-	public static function maybe_schedule_daily_sync() {
-		if ( ! wp_next_scheduled( self::DAILY_SYNC_HOOK ) ) {
-			wp_schedule_event( time() + MINUTE_IN_SECONDS, 'daily', self::DAILY_SYNC_HOOK );
-		}
-	}
-
-	/**
-	 * Daily job: queue a fresh sync for every location.
-	 *
-	 * @return void
-	 */
-	public static function run_daily_sync() {
+	public static function run_sync() {
 		global $wpdb;
 
 		$locations_table = $wpdb->prefix . 'mlgr_locations';
@@ -78,7 +133,7 @@ class Maintenance_Manager {
 		}
 
 		foreach ( $location_ids as $location_id ) {
-			Review_Syncer::schedule_initial_sync( absint( $location_id ) );
+			Review_Syncer::schedule_resync( absint( $location_id ) );
 		}
 	}
 

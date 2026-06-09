@@ -30,6 +30,11 @@ class Admin_Settings_Page {
 	const TAB_SYNC_LOGS = 'sync-logs';
 
 	/**
+	 * Settings tab slug.
+	 */
+	const TAB_SETTINGS = 'settings';
+
+	/**
 	 * Assign reviews tab slug.
 	 */
 	const TAB_ASSIGN = 'assign-reviews';
@@ -51,6 +56,7 @@ class Admin_Settings_Page {
 		add_action( 'admin_post_mlgr_force_resync', array( __CLASS__, 'handle_force_resync' ) );
 		add_action( 'admin_post_mlgr_clear_logs', array( __CLASS__, 'handle_clear_logs' ) );
 		add_action( 'admin_post_mlgr_bulk_assign', array( __CLASS__, 'handle_bulk_assign' ) );
+		add_action( 'admin_post_mlgr_delete_location', array( __CLASS__, 'handle_delete_location' ) );
 	}
 
 	/**
@@ -87,17 +93,14 @@ class Admin_Settings_Page {
 
 			<?php if ( self::TAB_WELCOME === $active_tab ) : ?>
 				<?php self::render_welcome_tab(); ?>
+			<?php elseif ( self::TAB_SETTINGS === $active_tab ) : ?>
+				<?php self::render_settings_tab(); ?>
 			<?php elseif ( self::TAB_SYNC_LOGS === $active_tab ) : ?>
 				<?php self::render_sync_logs_tab(); ?>
 			<?php elseif ( self::TAB_ASSIGN === $active_tab ) : ?>
 				<?php self::render_assign_tab(); ?>
 			<?php else : ?>
-				<?php
-				$api_key             = get_option( SerpApi_Fetcher::API_KEY_OPTION, '' );
-				$anonymize_reviewers = (bool) get_option( self::ANONYMIZE_REVIEWERS_OPTION, false );
-				$locations           = self::get_locations_with_counts();
-				self::render_locations_tab( $api_key, $anonymize_reviewers, $locations );
-				?>
+				<?php self::render_locations_tab( self::get_locations_with_counts() ); ?>
 			<?php endif; ?>
 		</div>
 		<?php
@@ -115,6 +118,7 @@ class Admin_Settings_Page {
 			self::TAB_LOCATIONS => 'Locations',
 			self::TAB_ASSIGN    => 'Assign Reviews',
 			self::TAB_SYNC_LOGS => 'Sync Logs',
+			self::TAB_SETTINGS  => 'Settings',
 		);
 		?>
 		<h2 class="nav-tab-wrapper" style="margin-bottom: 18px;">
@@ -144,20 +148,21 @@ class Admin_Settings_Page {
 	 */
 	private static function render_welcome_tab() {
 		$assign_url    = add_query_arg( array( 'page' => self::PAGE_SLUG, 'tab' => self::TAB_ASSIGN ), admin_url( 'options-general.php' ) );
+		$settings_url  = add_query_arg( array( 'page' => self::PAGE_SLUG, 'tab' => self::TAB_SETTINGS ), admin_url( 'options-general.php' ) );
 		$locations_url = add_query_arg( array( 'page' => self::PAGE_SLUG, 'tab' => self::TAB_LOCATIONS ), admin_url( 'options-general.php' ) );
 		$taxonomy_url  = admin_url( 'edit-tags.php?taxonomy=' . CPT_Manager::TAXONOMY . '&post_type=' . CPT_Manager::POST_TYPE );
 		?>
 		<h2>Welcome</h2>
 		<p>
-			This plugin syncs Google reviews from one or many business locations via SerpApi and displays them on any page using shortcodes.
+			This plugin scrapes Google reviews from one or many business locations using a self-hosted scraper and displays them on any page using shortcodes.
 			Reviews are stored as a WordPress custom post type (<code>mlgr_review</code>) so they can be tagged, filtered, and linked to any page or CPT post on your site.
 		</p>
 
 		<h3>Quick Start</h3>
 		<ol>
-			<li>Go to <a href="<?php echo esc_url( $locations_url ); ?>"><strong>Locations</strong></a> and enter your SerpApi key.</li>
-			<li>Add one or more business locations using a Google Place ID or SerpApi Data ID.</li>
-			<li>Wait for the background sync to complete, or click <strong>Force Resync</strong> for an immediate refresh.</li>
+			<li>Go to <a href="<?php echo esc_url( $settings_url ); ?>"><strong>Settings</strong></a> and confirm the Scraper API URL points to your running google-reviews-scraper-pro server.</li>
+			<li>Go to <a href="<?php echo esc_url( $locations_url ); ?>"><strong>Locations</strong></a> and add one or more business locations by pasting their Google Maps URL.</li>
+			<li>The plugin will scrape reviews in the background (takes a few minutes). Click <strong>Force Resync</strong> to trigger a fresh scrape at any time.</li>
 			<li>Place a shortcode on any page or post to display your reviews.</li>
 		</ol>
 
@@ -275,47 +280,59 @@ class Admin_Settings_Page {
 	}
 
 	/**
-	 * Render locations tab (settings + location list).
+	 * Render plugin settings tab (scraper API URL + sync frequency).
 	 *
-	 * @param string $api_key             SerpApi key.
-	 * @param bool   $anonymize_reviewers Reviewer anonymization flag.
-	 * @param array  $locations           Location rows.
 	 * @return void
 	 */
-	private static function render_locations_tab( $api_key, $anonymize_reviewers, $locations ) {
-		?>
-		<style>
-			.mlgr-error-badge {
-				display: inline-block;
-				margin-left: 8px;
-				padding: 2px 8px;
-				border-radius: 999px;
-				font-size: 11px;
-				font-weight: 600;
-				color: #ffffff;
-				background: #d63638;
-				vertical-align: middle;
-			}
-		</style>
+	private static function render_settings_tab() {
+		$scraper_api_url     = get_option( Scraper_Fetcher::API_URL_OPTION, Scraper_Fetcher::DEFAULT_API_URL );
+		$scraper_api_key     = (string) get_option( Scraper_Fetcher::API_KEY_OPTION, '' );
+		$anonymize_reviewers = (bool) get_option( self::ANONYMIZE_REVIEWERS_OPTION, false );
+		$sync_frequency      = (string) get_option( Maintenance_Manager::SYNC_FREQUENCY_OPTION, 'monthly' );
+		$excluded_ratings    = array_map( 'intval', (array) get_option( Review_Syncer::EXCLUDED_RATINGS_OPTION, array() ) );
 
-		<h2>SerpApi Settings</h2>
+		$frequency_options = array(
+			'daily'   => 'Daily',
+			'weekly'  => 'Weekly',
+			'monthly' => 'Monthly (default)',
+			'manual'  => 'Manual only (disable automatic sync)',
+		);
+		?>
+		<h2>Scraper Settings</h2>
 		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 			<input type="hidden" name="action" value="mlgr_save_settings" />
 			<?php wp_nonce_field( 'mlgr_save_settings', 'mlgr_settings_nonce' ); ?>
 			<table class="form-table" role="presentation">
 				<tr>
 					<th scope="row">
-						<label for="serpapi_key">serpapi_key</label>
+						<label for="scraper_api_url">Scraper API URL</label>
+					</th>
+					<td>
+						<input
+							type="url"
+							id="scraper_api_url"
+							name="scraper_api_url"
+							value="<?php echo esc_attr( is_string( $scraper_api_url ) ? $scraper_api_url : Scraper_Fetcher::DEFAULT_API_URL ); ?>"
+							class="regular-text"
+							placeholder="http://localhost:8000"
+						/>
+						<p class="description">Base URL of the google-reviews-scraper-pro API server (no trailing slash). Default: <code>http://localhost:8000</code>.</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row">
+						<label for="scraper_api_key">Scraper API Key</label>
 					</th>
 					<td>
 						<input
 							type="password"
-							id="serpapi_key"
-							name="serpapi_key"
-							value="<?php echo esc_attr( is_string( $api_key ) ? $api_key : '' ); ?>"
+							id="scraper_api_key"
+							name="scraper_api_key"
+							value="<?php echo esc_attr( $scraper_api_key ); ?>"
 							class="regular-text"
 							autocomplete="new-password"
 						/>
+						<p class="description">API key for the scraper server. Leave blank if no key is configured.</p>
 					</td>
 				</tr>
 				<tr>
@@ -335,11 +352,68 @@ class Admin_Settings_Page {
 						</label>
 					</td>
 				</tr>
+				<tr>
+					<th scope="row">
+						<label for="sync_frequency">Sync Frequency</label>
+					</th>
+					<td>
+						<select id="sync_frequency" name="sync_frequency">
+							<?php foreach ( $frequency_options as $value => $label ) : ?>
+								<option value="<?php echo esc_attr( $value ); ?>" <?php selected( $sync_frequency, $value ); ?>>
+									<?php echo esc_html( $label ); ?>
+								</option>
+							<?php endforeach; ?>
+						</select>
+						<p class="description">How often the plugin automatically re-scrapes reviews from Google.</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row">Exclude Ratings from Sync</th>
+					<td>
+						<fieldset>
+							<legend class="screen-reader-text">Exclude Ratings from Sync</legend>
+							<?php for ( $star = 1; $star <= 5; $star++ ) : ?>
+								<label style="display:block; margin-bottom:4px;">
+									<input
+										type="checkbox"
+										name="sync_excluded_ratings[]"
+										value="<?php echo esc_attr( (string) $star ); ?>"
+										<?php checked( in_array( $star, $excluded_ratings, true ) ); ?>
+									/>
+									<?php echo esc_html( $star . ( 1 === $star ? ' star' : ' stars' ) ); ?>
+								</label>
+							<?php endfor; ?>
+						</fieldset>
+						<p class="description">Reviews with these star ratings will be skipped during sync and not saved to WordPress. By default nothing is filtered.</p>
+					</td>
+				</tr>
 			</table>
 			<?php submit_button( 'Save Settings' ); ?>
 		</form>
+		<?php
+	}
 
-		<hr />
+	/**
+	 * Render locations tab (location list).
+	 *
+	 * @param array $locations Location rows.
+	 * @return void
+	 */
+	private static function render_locations_tab( $locations ) {
+		?>
+		<style>
+			.mlgr-error-badge {
+				display: inline-block;
+				margin-left: 8px;
+				padding: 2px 8px;
+				border-radius: 999px;
+				font-size: 11px;
+				font-weight: 600;
+				color: #ffffff;
+				background: #d63638;
+				vertical-align: middle;
+			}
+		</style>
 
 		<h2>Locations Management</h2>
 		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
@@ -348,20 +422,22 @@ class Admin_Settings_Page {
 			<table class="form-table" role="presentation">
 				<tr>
 					<th scope="row">
-						<label for="google_place_id">Add New Location (Google Place ID or SerpApi Data ID)</label>
+						<label for="google_place_id">Add New Location (Google Maps URL)</label>
 					</th>
 					<td>
 						<input
-							type="text"
+							type="url"
 							id="google_place_id"
 							name="google_place_id"
 							class="regular-text"
+							placeholder="https://maps.app.goo.gl/..."
 							required
 						/>
+						<p class="description">Paste the Google Maps URL for the business (e.g. <code>https://maps.app.goo.gl/abc123</code> or <code>https://www.google.com/maps/place/...</code>).</p>
 					</td>
 				</tr>
 			</table>
-			<?php submit_button( 'Add Location' ); ?>
+			<?php submit_button( 'Add Location &amp; Start Scrape' ); ?>
 		</form>
 
 		<h2>Existing Locations</h2>
@@ -369,7 +445,7 @@ class Admin_Settings_Page {
 			<thead>
 				<tr>
 					<th>ID</th>
-					<th>Location ID (Place/Data ID)</th>
+					<th>Google Maps URL</th>
 					<th>Name</th>
 					<th>Total Reviews</th>
 					<th>Sync Status</th>
@@ -391,7 +467,7 @@ class Admin_Settings_Page {
 						$last_error_context = isset( $location['last_error_context'] ) ? (string) $location['last_error_context'] : '';
 						$last_error_label   = '' !== $last_error_time ? $last_error_time . ' - ' . $last_error : $last_error;
 						$recent_error_count = isset( $location['recent_error_count'] ) ? (int) $location['recent_error_count'] : 0;
-						$has_recent_errors  = ! empty( $location['has_recent_errors'] );
+						$has_recent_errors  = ! empty( $location['has_recent_errors'] ) && 'completed' !== $location['sync_status'];
 						?>
 						<tr>
 							<td><?php echo esc_html( (string) $location['id'] ); ?></td>
@@ -410,12 +486,29 @@ class Admin_Settings_Page {
 							<td title="<?php echo esc_attr( $last_error_context ); ?>">
 								<?php echo esc_html( '' !== $last_error_label ? $last_error_label : '-' ); ?>
 							</td>
-							<td>
+							<td style="display:flex; gap:6px; flex-wrap:wrap;">
 								<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 									<input type="hidden" name="action" value="mlgr_force_resync" />
 									<input type="hidden" name="location_id" value="<?php echo esc_attr( (string) $location['id'] ); ?>" />
 									<?php wp_nonce_field( 'mlgr_force_resync_' . $location['id'], 'mlgr_force_resync_nonce' ); ?>
 									<?php submit_button( 'Force Resync', 'secondary small', 'submit', false ); ?>
+								</form>
+								<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+									<input type="hidden" name="action" value="mlgr_delete_location" />
+									<input type="hidden" name="location_id" value="<?php echo esc_attr( (string) $location['id'] ); ?>" />
+									<?php wp_nonce_field( 'mlgr_delete_location_' . $location['id'], 'mlgr_delete_location_nonce' ); ?>
+									<?php
+									submit_button(
+										'Delete',
+										'delete small',
+										'submit',
+										false,
+										array( 'onclick' => sprintf(
+											"return confirm('Delete this location and all %d synced review(s)? This cannot be undone.');",
+											(int) $location['review_count']
+										) )
+									);
+									?>
 								</form>
 							</td>
 						</tr>
@@ -435,7 +528,7 @@ class Admin_Settings_Page {
 		$rows = Logger::get_recent_logs( 50 );
 		?>
 		<h2>Sync Logs</h2>
-		<p>Shows the latest 50 SerpApi sync errors.</p>
+		<p>Shows the latest 50 scraper sync errors.</p>
 
 		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="margin-bottom: 12px;">
 			<input type="hidden" name="action" value="mlgr_clear_logs" />
@@ -477,7 +570,7 @@ class Admin_Settings_Page {
 	}
 
 	/**
-	 * Save SerpApi settings.
+	 * Save scraper settings.
 	 *
 	 * @return void
 	 */
@@ -488,13 +581,35 @@ class Admin_Settings_Page {
 
 		check_admin_referer( 'mlgr_save_settings', 'mlgr_settings_nonce' );
 
-		$api_key             = isset( $_POST['serpapi_key'] ) ? sanitize_text_field( wp_unslash( $_POST['serpapi_key'] ) ) : '';
+		$scraper_api_url = isset( $_POST['scraper_api_url'] ) ? esc_url_raw( wp_unslash( $_POST['scraper_api_url'] ) ) : '';
+		if ( '' === trim( $scraper_api_url ) ) {
+			$scraper_api_url = Scraper_Fetcher::DEFAULT_API_URL;
+		}
+		$scraper_api_url = rtrim( trim( $scraper_api_url ), '/' );
+
+		$scraper_api_key = isset( $_POST['scraper_api_key'] ) ? sanitize_text_field( wp_unslash( $_POST['scraper_api_key'] ) ) : '';
+		update_option( Scraper_Fetcher::API_KEY_OPTION, $scraper_api_key );
+
 		$anonymize_reviewers = isset( $_POST['anonymize_reviewers'] ) ? 1 : 0;
+		$frequency           = isset( $_POST['sync_frequency'] ) ? sanitize_key( wp_unslash( $_POST['sync_frequency'] ) ) : 'monthly';
+		if ( ! in_array( $frequency, array( 'daily', 'weekly', 'monthly', 'manual' ), true ) ) {
+			$frequency = 'monthly';
+		}
 
-		update_option( SerpApi_Fetcher::API_KEY_OPTION, $api_key );
+		$excluded_ratings_raw = isset( $_POST['sync_excluded_ratings'] ) && is_array( $_POST['sync_excluded_ratings'] )
+			? array_map( 'intval', $_POST['sync_excluded_ratings'] )
+			: array();
+		$excluded_ratings = array_values( array_filter( $excluded_ratings_raw, function ( $r ) {
+			return $r >= 1 && $r <= 5;
+		} ) );
+
+		update_option( Scraper_Fetcher::API_URL_OPTION, $scraper_api_url );
 		update_option( self::ANONYMIZE_REVIEWERS_OPTION, $anonymize_reviewers );
+		update_option( Maintenance_Manager::SYNC_FREQUENCY_OPTION, $frequency );
+		update_option( Review_Syncer::EXCLUDED_RATINGS_OPTION, $excluded_ratings );
+		Maintenance_Manager::maybe_schedule_sync();
 
-		self::redirect_with_notice( 'Settings saved.', 'success' );
+		self::redirect_with_notice( 'Settings saved.', 'success', self::TAB_SETTINGS );
 	}
 
 	/**
@@ -511,11 +626,15 @@ class Admin_Settings_Page {
 
 		check_admin_referer( 'mlgr_add_location', 'mlgr_add_location_nonce' );
 
-		$place_id = isset( $_POST['google_place_id'] ) ? sanitize_text_field( wp_unslash( $_POST['google_place_id'] ) ) : '';
+		$place_id = isset( $_POST['google_place_id'] ) ? esc_url_raw( wp_unslash( $_POST['google_place_id'] ) ) : '';
 		$place_id = trim( $place_id );
 
 		if ( '' === $place_id ) {
-			self::redirect_with_notice( 'Location ID is required.', 'error' );
+			self::redirect_with_notice( 'Google Maps URL is required.', 'error' );
+		}
+
+		if ( false === strpos( $place_id, 'google.com/maps' ) && false === strpos( $place_id, 'maps.app.goo.gl' ) ) {
+			self::redirect_with_notice( 'Please enter a valid Google Maps URL (google.com/maps or maps.app.goo.gl).', 'error' );
 		}
 
 		$locations_table = $wpdb->prefix . 'mlgr_locations';
@@ -532,7 +651,7 @@ class Admin_Settings_Page {
 		);
 
 		if ( false === $inserted ) {
-			self::redirect_with_notice( 'Unable to add location. It may already exist.', 'error' );
+			self::redirect_with_notice( 'Unable to add location. This URL may already exist.', 'error' );
 		}
 
 		$location_id = (int) $wpdb->insert_id;
@@ -542,7 +661,7 @@ class Admin_Settings_Page {
 			self::redirect_with_notice( 'Location added, but initial sync could not be scheduled.', 'error' );
 		}
 
-		self::redirect_with_notice( 'Location added and sync started.', 'success' );
+		self::redirect_with_notice( 'Location added. Scraping will begin in the background — check back in a few minutes.', 'success' );
 	}
 
 	/**
@@ -585,12 +704,84 @@ class Admin_Settings_Page {
 		);
 		Review_Syncer::clear_sync_error( $location_id );
 
-		$scheduled = Review_Syncer::schedule_initial_sync( $location_id );
+		$scheduled = Review_Syncer::schedule_resync( $location_id );
 		if ( false === $scheduled ) {
 			self::redirect_with_notice( 'Unable to schedule resync.', 'error' );
 		}
 
-		self::redirect_with_notice( 'Resync scheduled.', 'success' );
+		self::redirect_with_notice( 'Fresh scrape scheduled. Reviews will update in the background.', 'success' );
+	}
+
+	/**
+	 * Permanently delete a location and all its synced reviews.
+	 *
+	 * @return void
+	 */
+	public static function handle_delete_location() {
+		global $wpdb;
+
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( 'Unauthorized request.' );
+		}
+
+		$location_id = isset( $_POST['location_id'] ) ? absint( $_POST['location_id'] ) : 0;
+		if ( $location_id <= 0 ) {
+			self::redirect_with_notice( 'Invalid location ID.', 'error' );
+		}
+
+		check_admin_referer( 'mlgr_delete_location_' . $location_id, 'mlgr_delete_location_nonce' );
+
+		$locations_table = $wpdb->prefix . 'mlgr_locations';
+		$exists          = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT id FROM {$locations_table} WHERE id = %d LIMIT 1",
+				$location_id
+			)
+		);
+
+		if ( ! $exists ) {
+			self::redirect_with_notice( 'Location not found.', 'error' );
+		}
+
+		// Delete all mlgr_review posts associated with this location.
+		$review_ids = get_posts(
+			array(
+				'post_type'      => CPT_Manager::POST_TYPE,
+				'post_status'    => array( 'publish', 'draft' ),
+				'posts_per_page' => -1,
+				'fields'         => 'ids',
+				'no_found_rows'  => true,
+				'meta_query'     => array(
+					array(
+						'key'   => CPT_Manager::META_LOCATION_ID,
+						'value' => $location_id,
+						'type'  => 'NUMERIC',
+					),
+				),
+			)
+		);
+
+		wp_suspend_cache_invalidation( true );
+		foreach ( $review_ids as $post_id ) {
+			wp_delete_post( (int) $post_id, true );
+		}
+		wp_suspend_cache_invalidation( false );
+
+		// Delete the location row.
+		$wpdb->delete(
+			$locations_table,
+			array( 'id' => $location_id ),
+			array( '%d' )
+		);
+
+		Review_Syncer::clear_sync_error( $location_id );
+		Review_Shortcode::flush_cache();
+
+		$deleted_count = count( $review_ids );
+		self::redirect_with_notice(
+			sprintf( 'Location deleted along with %d synced review(s).', $deleted_count ),
+			'success'
+		);
 	}
 
 	/**
@@ -622,7 +813,6 @@ class Admin_Settings_Page {
 		global $wpdb;
 
 		$locations_table = $wpdb->prefix . 'mlgr_locations';
-		$reviews_table   = $wpdb->prefix . 'mlgr_reviews';
 
 		$query = "SELECT
 				l.id,
@@ -630,10 +820,15 @@ class Admin_Settings_Page {
 				l.name,
 				l.last_sync,
 				l.sync_status,
-				COUNT(r.id) AS review_count
+				COUNT(DISTINCT p.ID) AS review_count
 			FROM {$locations_table} l
-			LEFT JOIN {$reviews_table} r
-				ON r.location_id = l.id
+			LEFT JOIN {$wpdb->postmeta} pm
+				ON pm.meta_key = '_mlgr_location_id'
+				AND pm.meta_value = l.id
+			LEFT JOIN {$wpdb->posts} p
+				ON p.ID = pm.post_id
+				AND p.post_type = 'mlgr_review'
+				AND p.post_status IN ('publish', 'draft')
 			GROUP BY l.id, l.google_place_id, l.name, l.last_sync, l.sync_status
 			ORDER BY l.id DESC";
 
@@ -679,7 +874,7 @@ class Admin_Settings_Page {
 	 */
 	private static function get_active_tab() {
 		$tab = isset( $_GET['tab'] ) ? sanitize_key( wp_unslash( $_GET['tab'] ) ) : self::TAB_WELCOME;
-		if ( ! in_array( $tab, array( self::TAB_WELCOME, self::TAB_LOCATIONS, self::TAB_ASSIGN, self::TAB_SYNC_LOGS ), true ) ) {
+		if ( ! in_array( $tab, array( self::TAB_WELCOME, self::TAB_SETTINGS, self::TAB_LOCATIONS, self::TAB_ASSIGN, self::TAB_SYNC_LOGS ), true ) ) {
 			return self::TAB_WELCOME;
 		}
 
@@ -962,7 +1157,7 @@ class Admin_Settings_Page {
 	 */
 	private static function redirect_with_notice( $message, $type, $tab = self::TAB_LOCATIONS ) {
 		$tab = sanitize_key( $tab );
-		if ( ! in_array( $tab, array( self::TAB_WELCOME, self::TAB_LOCATIONS, self::TAB_ASSIGN, self::TAB_SYNC_LOGS ), true ) ) {
+		if ( ! in_array( $tab, array( self::TAB_WELCOME, self::TAB_SETTINGS, self::TAB_LOCATIONS, self::TAB_ASSIGN, self::TAB_SYNC_LOGS ), true ) ) {
 			$tab = self::TAB_LOCATIONS;
 		}
 

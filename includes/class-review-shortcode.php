@@ -515,7 +515,7 @@ class Review_Shortcode {
 					line-height: 1.1;
 					overflow: hidden;
 					text-overflow: ellipsis;
-					white-space: nowrap;
+					/* white-space: nowrap; */
 				}
 				.mlgr-review-date {
 					color: #8b8f94;
