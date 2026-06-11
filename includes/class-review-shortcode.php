@@ -37,6 +37,21 @@ class Review_Shortcode {
 	public static function init() {
 		add_shortcode( self::SHORTCODE_TAG, array( __CLASS__, 'render' ) );
 		add_shortcode( self::RATING_SHORTCODE_TAG, array( __CLASS__, 'render_rating' ) );
+		add_action( 'save_post_' . CPT_Manager::POST_TYPE, array( __CLASS__, 'flush_cache_on_post_save' ) );
+	}
+
+	/**
+	 * Flush the shortcode cache whenever a review post is saved or published.
+	 *
+	 * Skips autosaves so the cache is not flushed on every keystroke in the editor.
+	 *
+	 * @return void
+	 */
+	public static function flush_cache_on_post_save() {
+		if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) {
+			return;
+		}
+		self::flush_cache();
 	}
 
 	/**
@@ -163,10 +178,15 @@ class Review_Shortcode {
 		$reviews = array();
 
 		foreach ( $query->posts as $post ) {
+			$photo_attachment_id = absint( get_post_meta( $post->ID, CPT_Manager::META_AUTHOR_PHOTO_ID, true ) );
+			$author_photo        = $photo_attachment_id > 0
+				? (string) wp_get_attachment_image_url( $photo_attachment_id, 'thumbnail' )
+				: (string) get_post_meta( $post->ID, CPT_Manager::META_AUTHOR_PHOTO, true );
+
 			$reviews[] = array(
 				'id'                => $post->ID,
 				'google_review_id'  => (string) get_post_meta( $post->ID, CPT_Manager::META_GOOGLE_REVIEW_ID, true ),
-				'author_photo'      => (string) get_post_meta( $post->ID, CPT_Manager::META_AUTHOR_PHOTO, true ),
+				'author_photo'      => $author_photo,
 				'author_name'       => $post->post_title,
 				'rating'            => (int) get_post_meta( $post->ID, CPT_Manager::META_RATING, true ),
 				'text'              => $post->post_content,

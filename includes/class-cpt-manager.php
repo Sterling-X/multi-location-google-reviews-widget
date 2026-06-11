@@ -35,9 +35,15 @@ class CPT_Manager {
 	const META_RATING = '_mlgr_rating';
 
 	/**
-	 * Post meta key storing the reviewer's photo URL.
+	 * Post meta key storing the reviewer's photo URL (from Google, set during sync).
 	 */
 	const META_AUTHOR_PHOTO = '_mlgr_author_photo';
+
+	/**
+	 * Post meta key storing a local WP attachment ID for the reviewer's photo.
+	 * Takes priority over META_AUTHOR_PHOTO when set. Used for manually added reviews.
+	 */
+	const META_AUTHOR_PHOTO_ID = '_mlgr_author_photo_id';
 
 	/**
 	 * Term meta key storing the WP post ID linked to a taxonomy term.
@@ -62,6 +68,10 @@ class CPT_Manager {
 		add_filter( 'manage_edit-' . self::POST_TYPE . '_sortable_columns', array( __CLASS__, 'rating_sortable_column' ) );
 		add_action( 'pre_get_posts', array( __CLASS__, 'sort_by_rating' ) );
 		add_action( 'add_meta_boxes', array( __CLASS__, 'register_rating_meta_box' ) );
+		add_action( 'add_meta_boxes', array( __CLASS__, 'register_author_photo_meta_box' ) );
+		add_action( 'save_post_' . self::POST_TYPE, array( __CLASS__, 'save_rating_meta' ) );
+		add_action( 'save_post_' . self::POST_TYPE, array( __CLASS__, 'save_author_photo_meta' ) );
+		add_action( 'admin_enqueue_scripts', array( __CLASS__, 'enqueue_author_photo_scripts' ) );
 	}
 
 	/**
@@ -294,22 +304,266 @@ class CPT_Manager {
 	}
 
 	/**
-	 * Render read-only star rating inside the meta box.
+	 * Render editable star rating picker inside the meta box.
 	 *
 	 * @param WP_Post $post Current post.
 	 * @return void
 	 */
 	public static function render_rating_meta_box( $post ) {
+		wp_nonce_field( 'mlgr_save_rating', 'mlgr_rating_nonce' );
+
 		$rating = (int) get_post_meta( $post->ID, self::META_RATING, true );
-		$stars  = str_repeat( '★', $rating ) . str_repeat( '☆', max( 0, 5 - $rating ) );
+		$rating = max( 0, min( 5, $rating ) );
 		?>
-		<p style="font-size:22px; color:#f5a623; margin:4px 0 2px;">
-			<?php echo esc_html( $stars ); ?>
+		<style>
+			.mlgr-star-picker {
+				display: flex;
+				flex-direction: row-reverse;
+				justify-content: flex-end;
+				gap: 2px;
+				margin: 6px 0 8px;
+			}
+			.mlgr-star-picker input[type="radio"] {
+				display: none;
+			}
+			.mlgr-star-picker label {
+				font-size: 28px;
+				color: #c9c9c9;
+				cursor: pointer;
+				line-height: 1;
+			}
+			.mlgr-star-picker input[type="radio"]:checked ~ label,
+			.mlgr-star-picker label:hover,
+			.mlgr-star-picker label:hover ~ label {
+				color: #f5a623;
+			}
+		</style>
+		<div class="mlgr-star-picker" id="mlgr-star-picker">
+			<?php for ( $star = 5; $star >= 1; $star-- ) : ?>
+				<input
+					type="radio"
+					id="mlgr_star_<?php echo esc_attr( (string) $star ); ?>"
+					name="mlgr_rating_value"
+					value="<?php echo esc_attr( (string) $star ); ?>"
+					<?php checked( $rating, $star ); ?>
+				/>
+				<label for="mlgr_star_<?php echo esc_attr( (string) $star ); ?>" title="<?php echo esc_attr( $star . ' star' . ( 1 === $star ? '' : 's' ) ); ?>">★</label>
+			<?php endfor; ?>
+		</div>
+		<p style="margin:0; color:#555; font-size:12px;" id="mlgr-rating-label">
+			<?php echo esc_html( $rating > 0 ? $rating . ' out of 5' : 'No rating set' ); ?>
 		</p>
-		<p style="margin:0; color:#555;">
-			<?php echo esc_html( $rating . ' out of 5' ); ?>
-		</p>
+		<script>
+		(function() {
+			var picker = document.getElementById('mlgr-star-picker');
+			var label  = document.getElementById('mlgr-rating-label');
+			if (!picker || !label) { return; }
+			picker.addEventListener('change', function(e) {
+				if (e.target && e.target.name === 'mlgr_rating_value') {
+					var val = parseInt(e.target.value, 10);
+					label.textContent = val + ' out of 5';
+				}
+			});
+		}());
+		</script>
 		<?php
+	}
+
+	/**
+	 * Save the star rating on post save.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return void
+	 */
+	public static function save_rating_meta( $post_id ) {
+		if ( ! isset( $_POST['mlgr_rating_nonce'] ) ) {
+			return;
+		}
+		if ( ! wp_verify_nonce( wp_unslash( $_POST['mlgr_rating_nonce'] ), 'mlgr_save_rating' ) ) {
+			return;
+		}
+		if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) {
+			return;
+		}
+		if ( ! current_user_can( 'edit_post', $post_id ) ) {
+			return;
+		}
+
+		$rating = isset( $_POST['mlgr_rating_value'] ) ? (int) $_POST['mlgr_rating_value'] : 0;
+		$rating = max( 1, min( 5, $rating ) );
+
+		update_post_meta( $post_id, self::META_RATING, $rating );
+	}
+
+	/**
+	 * Enqueue WP media library scripts on the review edit screen.
+	 *
+	 * @param string $hook Current admin page hook.
+	 * @return void
+	 */
+	public static function enqueue_author_photo_scripts( $hook ) {
+		if ( 'post.php' !== $hook && 'post-new.php' !== $hook ) {
+			return;
+		}
+		$screen = get_current_screen();
+		if ( ! $screen || self::POST_TYPE !== $screen->post_type ) {
+			return;
+		}
+		wp_enqueue_media();
+	}
+
+	/**
+	 * Register the Reviewer Photo meta box on the edit review screen.
+	 *
+	 * @return void
+	 */
+	public static function register_author_photo_meta_box() {
+		add_meta_box(
+			'mlgr_author_photo_meta_box',
+			'Reviewer Photo',
+			array( __CLASS__, 'render_author_photo_meta_box' ),
+			self::POST_TYPE,
+			'side',
+			'default'
+		);
+	}
+
+	/**
+	 * Render the Reviewer Photo meta box.
+	 *
+	 * Shows the current local photo (if set), a media library picker, and a remove
+	 * button. For synced reviews the Google URL is shown as a read-only fallback.
+	 *
+	 * @param WP_Post $post Current post.
+	 * @return void
+	 */
+	public static function render_author_photo_meta_box( $post ) {
+		wp_nonce_field( 'mlgr_save_author_photo', 'mlgr_author_photo_nonce' );
+
+		$attachment_id = absint( get_post_meta( $post->ID, self::META_AUTHOR_PHOTO_ID, true ) );
+		$google_url    = (string) get_post_meta( $post->ID, self::META_AUTHOR_PHOTO, true );
+		$preview_url   = $attachment_id > 0 ? wp_get_attachment_image_url( $attachment_id, 'thumbnail' ) : false;
+		?>
+		<div id="mlgr-author-photo-wrap" style="margin-top:4px;">
+			<?php if ( false !== $preview_url ) : ?>
+				<img
+					id="mlgr-photo-preview"
+					src="<?php echo esc_url( $preview_url ); ?>"
+					alt=""
+					style="max-width:100%; height:auto; border-radius:50%; margin-bottom:8px; display:block;"
+				/>
+			<?php else : ?>
+				<img
+					id="mlgr-photo-preview"
+					src=""
+					alt=""
+					style="max-width:100%; height:auto; border-radius:50%; margin-bottom:8px; display:none;"
+				/>
+			<?php endif; ?>
+
+			<input
+				type="hidden"
+				id="mlgr_author_photo_id"
+				name="mlgr_author_photo_id"
+				value="<?php echo esc_attr( $attachment_id > 0 ? (string) $attachment_id : '' ); ?>"
+			/>
+
+			<p style="margin:0 0 4px;">
+				<button type="button" id="mlgr-select-photo" class="button button-secondary" style="width:100%;">
+					<?php echo esc_html( $attachment_id > 0 ? 'Change Photo' : 'Upload / Select Photo' ); ?>
+				</button>
+			</p>
+			<?php if ( $attachment_id > 0 ) : ?>
+				<p style="margin:0;">
+					<a href="#" id="mlgr-remove-photo" style="color:#b32d2e; font-size:12px;">Remove photo</a>
+				</p>
+			<?php else : ?>
+				<p style="margin:0; display:none;">
+					<a href="#" id="mlgr-remove-photo" style="color:#b32d2e; font-size:12px;">Remove photo</a>
+				</p>
+			<?php endif; ?>
+
+			<?php if ( '' !== $google_url && 0 === $attachment_id ) : ?>
+				<p style="margin:8px 0 0; font-size:11px; color:#888;">
+					Currently using Google profile photo. Upload a local image above to override it.
+				</p>
+			<?php endif; ?>
+		</div>
+		<script>
+		(function() {
+			var mediaUploader;
+			var selectBtn  = document.getElementById('mlgr-select-photo');
+			var removeLink = document.getElementById('mlgr-remove-photo');
+			var preview    = document.getElementById('mlgr-photo-preview');
+			var input      = document.getElementById('mlgr_author_photo_id');
+
+			if (!selectBtn) { return; }
+
+			selectBtn.addEventListener('click', function(e) {
+				e.preventDefault();
+				if (mediaUploader) {
+					mediaUploader.open();
+					return;
+				}
+				mediaUploader = wp.media({
+					title:    'Select Reviewer Photo',
+					button:   { text: 'Use this photo' },
+					multiple: false,
+					library:  { type: 'image' }
+				});
+				mediaUploader.on('select', function() {
+					var attachment = mediaUploader.state().get('selection').first().toJSON();
+					input.value          = attachment.id;
+					preview.src          = attachment.url;
+					preview.style.display = 'block';
+					removeLink.parentElement.style.display = 'block';
+					selectBtn.textContent = 'Change Photo';
+				});
+				mediaUploader.open();
+			});
+
+			if (removeLink) {
+				removeLink.addEventListener('click', function(e) {
+					e.preventDefault();
+					input.value           = '';
+					preview.src           = '';
+					preview.style.display = 'none';
+					removeLink.parentElement.style.display = 'none';
+					selectBtn.textContent = 'Upload / Select Photo';
+				});
+			}
+		}());
+		</script>
+		<?php
+	}
+
+	/**
+	 * Save the reviewer photo attachment ID on post save.
+	 *
+	 * @param int $post_id Post ID.
+	 * @return void
+	 */
+	public static function save_author_photo_meta( $post_id ) {
+		if ( ! isset( $_POST['mlgr_author_photo_nonce'] ) ) {
+			return;
+		}
+		if ( ! wp_verify_nonce( wp_unslash( $_POST['mlgr_author_photo_nonce'] ), 'mlgr_save_author_photo' ) ) {
+			return;
+		}
+		if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) {
+			return;
+		}
+		if ( ! current_user_can( 'edit_post', $post_id ) ) {
+			return;
+		}
+
+		$attachment_id = isset( $_POST['mlgr_author_photo_id'] ) ? absint( $_POST['mlgr_author_photo_id'] ) : 0;
+
+		if ( $attachment_id > 0 ) {
+			update_post_meta( $post_id, self::META_AUTHOR_PHOTO_ID, $attachment_id );
+		} else {
+			delete_post_meta( $post_id, self::META_AUTHOR_PHOTO_ID );
+		}
 	}
 
 	/**
