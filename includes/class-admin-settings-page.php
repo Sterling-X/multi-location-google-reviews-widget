@@ -57,6 +57,7 @@ class Admin_Settings_Page {
 		add_action( 'admin_post_mlgr_clear_logs', array( __CLASS__, 'handle_clear_logs' ) );
 		add_action( 'admin_post_mlgr_bulk_assign', array( __CLASS__, 'handle_bulk_assign' ) );
 		add_action( 'admin_post_mlgr_delete_location', array( __CLASS__, 'handle_delete_location' ) );
+		add_action( 'admin_post_mlgr_flush_cache', array( __CLASS__, 'handle_flush_cache' ) );
 	}
 
 	/**
@@ -389,6 +390,16 @@ class Admin_Settings_Page {
 				</tr>
 			</table>
 			<?php submit_button( 'Save Settings' ); ?>
+		</form>
+
+		<hr style="margin: 32px 0;" />
+
+		<h2>Cache</h2>
+		<p>The shortcode output is cached for 1 hour. Flush it here to force all <code>[ml_google_reviews]</code> shortcodes to re-render immediately — useful after manually editing or publishing reviews.</p>
+		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+			<input type="hidden" name="action" value="mlgr_flush_cache" />
+			<?php wp_nonce_field( 'mlgr_flush_cache', 'mlgr_flush_cache_nonce' ); ?>
+			<?php submit_button( 'Flush Shortcode Cache', 'secondary', 'submit', false ); ?>
 		</form>
 		<?php
 	}
@@ -782,6 +793,23 @@ class Admin_Settings_Page {
 			sprintf( 'Location deleted along with %d synced review(s).', $deleted_count ),
 			'success'
 		);
+	}
+
+	/**
+	 * Flush all shortcode transient cache entries.
+	 *
+	 * @return void
+	 */
+	public static function handle_flush_cache() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( 'Unauthorized request.' );
+		}
+
+		check_admin_referer( 'mlgr_flush_cache', 'mlgr_flush_cache_nonce' );
+
+		Review_Shortcode::flush_cache();
+
+		self::redirect_with_notice( 'Shortcode cache flushed. All review widgets will re-render on the next page load.', 'success', self::TAB_SETTINGS );
 	}
 
 	/**
