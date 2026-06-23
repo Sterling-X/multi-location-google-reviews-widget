@@ -213,10 +213,13 @@ class Review_Shortcode {
 
 		$defaults = array(
 			'location_id' => 0,
+			'show_stars'  => 'false',
 		);
-		$atts     = shortcode_atts( $defaults, (array) $atts, self::RATING_SHORTCODE_TAG );
+		$atts = shortcode_atts( $defaults, (array) $atts, self::RATING_SHORTCODE_TAG );
 
-		$location_id     = absint( $atts['location_id'] );
+		$location_id = absint( $atts['location_id'] );
+		$show_stars  = in_array( strtolower( (string) $atts['show_stars'] ), array( 'true', '1', 'yes' ), true );
+
 		$locations_table = $wpdb->prefix . 'mlgr_locations';
 		$row             = null;
 
@@ -260,9 +263,46 @@ class Review_Shortcode {
 		$reviews_text = number_format_i18n( $total_reviews );
 		$review_label = ( 1 === $total_reviews ) ? 'review' : 'reviews';
 
-		return sprintf(
+		$text_html = sprintf(
 			'<span class="mlgr-rating-text">%s</span>',
 			esc_html( $rating_text . ' / 5 based on ' . $reviews_text . ' ' . $review_label )
+		);
+
+		if ( ! $show_stars ) {
+			return $text_html;
+		}
+
+		// Build star row — each star is filled proportionally based on the rating.
+		$stars_html = sprintf(
+			'<span class="mlgr-rating-stars" role="img" aria-label="%s" style="display:inline-flex;gap:3px;font-size:28px;line-height:1;">',
+			esc_attr( $rating_text . ' out of 5 stars' )
+		);
+
+		for ( $i = 1; $i <= 5; $i++ ) {
+			$fill = min( 100, max( 0, (int) round( ( $average_rating - ( $i - 1 ) ) * 100 ) ) );
+
+			if ( $fill >= 100 ) {
+				$stars_html .= '<span style="color:#f5a623;">&#9733;</span>';
+			} elseif ( $fill <= 0 ) {
+				$stars_html .= '<span style="color:#d0d0d0;">&#9733;</span>';
+			} else {
+				// Partial star: gold foreground clipped to fill%, gray background visible behind.
+				$stars_html .= sprintf(
+					'<span style="display:inline-block;position:relative;color:#d0d0d0;">'
+					. '&#9733;'
+					. '<span style="position:absolute;top:0;left:0;overflow:hidden;color:#f5a623;width:%d%%;">&#9733;</span>'
+					. '</span>',
+					$fill
+				);
+			}
+		}
+
+		$stars_html .= '</span>';
+
+		return sprintf(
+			'<span class="mlgr-rating-widget" style="display:inline-flex;flex-direction:column;align-items:flex-start;gap:4px;">%s%s</span>',
+			$stars_html,
+			$text_html
 		);
 	}
 

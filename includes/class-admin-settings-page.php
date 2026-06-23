@@ -245,7 +245,7 @@ class Admin_Settings_Page {
 		</p>
 
 		<h4 style="margin-top: 26px;">2) Rating Summary &mdash; <code>[ml_google_rating]</code></h4>
-		<p>Renders a plain-text average rating, e.g. <em>4.7 / 5 based on 120 reviews</em>.</p>
+		<p>Renders an average rating summary. By default outputs plain text, e.g. <em>4.7 / 5 based on 120 reviews</em>. Enable <code>show_stars</code> to display a star row above the text.</p>
 		<table class="widefat striped">
 			<thead>
 				<tr>
@@ -260,11 +260,16 @@ class Admin_Settings_Page {
 					<td>Internal location ID. If omitted, the first location in the database is used.</td>
 					<td><code>[ml_google_rating location_id="2"]</code></td>
 				</tr>
+				<tr>
+					<td><code>show_stars</code></td>
+					<td>Set to <code>true</code> to render a row of star icons above the rating text. Fractional ratings display a proportionally filled partial star. Default: <code>false</code>.</td>
+					<td><code>[ml_google_rating show_stars="true"]</code></td>
+				</tr>
 			</tbody>
 		</table>
 
 		<p style="margin-top: 12px;">
-			<code>[ml_google_rating]</code> &nbsp;&nbsp; <code>[ml_google_rating location_id="2"]</code>
+			<code>[ml_google_rating]</code> &nbsp;&nbsp; <code>[ml_google_rating show_stars="true"]</code> &nbsp;&nbsp; <code>[ml_google_rating location_id="2" show_stars="true"]</code>
 		</p>
 
 		<h3 style="margin-top: 28px;">How Reviews Are Stored</h3>
