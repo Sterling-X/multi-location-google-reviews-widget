@@ -264,7 +264,7 @@ class Review_Shortcode {
 		$review_label = ( 1 === $total_reviews ) ? 'review' : 'reviews';
 
 		$text_html = sprintf(
-			'<span class="mlgr-rating-text">%s</span>',
+			'<span class="mlgr-rating-text" style="font-size:16px;">%s</span>',
 			esc_html( $rating_text . ' / 5 based on ' . $reviews_text . ' ' . $review_label )
 		);
 
@@ -274,27 +274,13 @@ class Review_Shortcode {
 
 		// Build star row — each star is filled proportionally based on the rating.
 		$stars_html = sprintf(
-			'<span class="mlgr-rating-stars" role="img" aria-label="%s" style="display:inline-flex;gap:3px;font-size:28px;line-height:1;">',
+			'<span class="mlgr-rating-stars" role="img" aria-label="%s" style="display:inline-flex;gap:2px;align-items:center;">',
 			esc_attr( $rating_text . ' out of 5 stars' )
 		);
 
 		for ( $i = 1; $i <= 5; $i++ ) {
-			$fill = min( 100, max( 0, (int) round( ( $average_rating - ( $i - 1 ) ) * 100 ) ) );
-
-			if ( $fill >= 100 ) {
-				$stars_html .= '<span style="color:#f5a623;">&#9733;</span>';
-			} elseif ( $fill <= 0 ) {
-				$stars_html .= '<span style="color:#d0d0d0;">&#9733;</span>';
-			} else {
-				// Partial star: gold foreground clipped to fill%, gray background visible behind.
-				$stars_html .= sprintf(
-					'<span style="display:inline-block;position:relative;color:#d0d0d0;">'
-					. '&#9733;'
-					. '<span style="position:absolute;top:0;left:0;overflow:hidden;color:#f5a623;width:%d%%;">&#9733;</span>'
-					. '</span>',
-					$fill
-				);
-			}
+			$fill        = min( 100, max( 0, (int) round( ( $average_rating - ( $i - 1 ) ) * 100 ) ) );
+			$stars_html .= self::render_star_svg( $fill );
 		}
 
 		$stars_html .= '</span>';
@@ -304,6 +290,39 @@ class Review_Shortcode {
 			$stars_html,
 			$text_html
 		);
+	}
+
+	/**
+	 * Render a single SVG star at the given fill percentage (0–100).
+	 *
+	 * Uses the Material Design star path for rounded tips. For partial fills,
+	 * a gold foreground SVG is clipped over a gray background SVG.
+	 *
+	 * @param int $fill_pct 0 = empty, 100 = full, 1–99 = partial.
+	 * @return string HTML string.
+	 */
+	private static function render_star_svg( $fill_pct ) {
+		$size        = 18;
+		$path        = 'M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z';
+		$color_full  = '#f5a623';
+		$color_empty = '#d0d0d0';
+
+		$svg_full  = '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="' . $color_full . '" xmlns="http://www.w3.org/2000/svg" style="display:block;"><path d="' . $path . '"/></svg>';
+		$svg_empty = '<svg width="' . $size . '" height="' . $size . '" viewBox="0 0 24 24" fill="' . $color_empty . '" xmlns="http://www.w3.org/2000/svg" style="display:block;"><path d="' . $path . '"/></svg>';
+
+		if ( $fill_pct >= 100 ) {
+			return $svg_full;
+		}
+		if ( $fill_pct <= 0 ) {
+			return $svg_empty;
+		}
+
+		// Partial: gray star underneath, gold star clipped to fill_pct% width on top.
+		return '<span style="display:inline-block;position:relative;width:' . $size . 'px;height:' . $size . 'px;flex-shrink:0;">'
+			. $svg_empty
+			. '<span style="position:absolute;top:0;left:0;overflow:hidden;width:' . $fill_pct . '%;">'
+			. $svg_full
+			. '</span></span>';
 	}
 
 	/**
