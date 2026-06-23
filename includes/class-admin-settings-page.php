@@ -483,7 +483,7 @@ class Admin_Settings_Page {
 						$last_error_context = isset( $location['last_error_context'] ) ? (string) $location['last_error_context'] : '';
 						$last_error_label   = '' !== $last_error_time ? $last_error_time . ' - ' . $last_error : $last_error;
 						$recent_error_count = isset( $location['recent_error_count'] ) ? (int) $location['recent_error_count'] : 0;
-						$has_recent_errors  = ! empty( $location['has_recent_errors'] ) && 'completed' !== $location['sync_status'];
+						$has_recent_errors  = ! empty( $location['has_recent_errors'] ) && ! in_array( $location['sync_status'], array( 'completed', 'duplicate' ), true );
 						?>
 						<tr>
 							<td><?php echo esc_html( (string) $location['id'] ); ?></td>
@@ -497,7 +497,13 @@ class Admin_Settings_Page {
 								<?php endif; ?>
 							</td>
 							<td><?php echo esc_html( (string) $location['review_count'] ); ?></td>
-							<td><?php echo esc_html( (string) $location['sync_status'] ); ?></td>
+							<td>
+								<?php if ( 'duplicate' === $location['sync_status'] ) : ?>
+									<span style="color:#996800; font-weight:600;" title="<?php esc_attr_e( 'This URL resolves to a place already tracked by another location.', 'multi-location-google-reviews-widget' ); ?>">duplicate</span>
+								<?php else : ?>
+									<?php echo esc_html( (string) $location['sync_status'] ); ?>
+								<?php endif; ?>
+							</td>
 							<td><?php echo esc_html( (string) ( $location['last_sync'] ? $location['last_sync'] : '-' ) ); ?></td>
 							<td title="<?php echo esc_attr( $last_error_context ); ?>">
 								<?php echo esc_html( '' !== $last_error_label ? $last_error_label : '-' ); ?>
@@ -654,6 +660,30 @@ class Admin_Settings_Page {
 		}
 
 		$locations_table = $wpdb->prefix . 'mlgr_locations';
+
+		// Best-effort early duplicate detection: if the scraper already knows
+		// this place (synced under a different URL), block the insert immediately
+		// rather than waiting for the sync to fail later.
+		$fetcher     = new Scraper_Fetcher();
+		$known_place = $fetcher->find_place_by_url( $place_id );
+		if ( is_array( $known_place ) && ! empty( $known_place['place_id'] ) ) {
+			$existing = $wpdb->get_row(
+				$wpdb->prepare(
+					"SELECT id, name FROM {$locations_table} WHERE scraper_place_id = %s LIMIT 1",
+					$known_place['place_id']
+				),
+				ARRAY_A
+			);
+			if ( is_array( $existing ) ) {
+				$existing_label = '' !== (string) $existing['name']
+					? '"' . (string) $existing['name'] . '" (Location #' . absint( $existing['id'] ) . ')'
+					: 'Location #' . absint( $existing['id'] );
+				self::redirect_with_notice(
+					sprintf( 'This place is already tracked as %s. No duplicate was created.', $existing_label ),
+					'error'
+				);
+			}
+		}
 
 		$inserted = $wpdb->insert(
 			$locations_table,

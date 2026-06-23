@@ -67,6 +67,14 @@ class Scraper_Fetcher {
 			return $result;
 		}
 
+		// Avoid duplicate scraper jobs: if a running or pending job already exists
+		// for this exact URL, reuse its job_id instead of triggering a new scrape.
+		$existing_job_id = $this->find_active_job_for_url( $maps_url );
+		if ( null !== $existing_job_id ) {
+			$result['job_id'] = $existing_job_id;
+			return $result;
+		}
+
 		$endpoint = self::get_api_url() . '/scrape';
 		$body     = wp_json_encode( array(
 			'url'         => $maps_url,
@@ -106,6 +114,47 @@ class Scraper_Fetcher {
 
 		$result['job_id'] = (string) $payload['job_id'];
 		return $result;
+	}
+
+	/**
+	 * Check whether an active (running or pending) scrape job already exists for a URL.
+	 *
+	 * Fetches GET /jobs?status=running and GET /jobs?status=pending, combines the
+	 * results, and returns the job_id of the first match on the url field.
+	 * Returns null when no match is found or either request fails.
+	 *
+	 * @param string $maps_url Exact Google Maps URL to look for.
+	 * @return string|null Matching job_id, or null if none found.
+	 */
+	private function find_active_job_for_url( $maps_url ) {
+		$jobs = array();
+
+		foreach ( array( 'running', 'pending' ) as $status ) {
+			$endpoint = self::get_api_url() . '/jobs?status=' . $status;
+			$response = wp_remote_get( $endpoint, array( 'timeout' => 10, 'headers' => self::get_headers() ) );
+
+			if ( is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
+				continue;
+			}
+
+			$data = json_decode( wp_remote_retrieve_body( $response ), true );
+			if ( is_array( $data ) ) {
+				$jobs = array_merge( $jobs, $data );
+			}
+		}
+
+		foreach ( $jobs as $job ) {
+			if ( ! is_array( $job ) ) {
+				continue;
+			}
+			$job_url = isset( $job['url'] ) ? (string) $job['url'] : '';
+			$job_id  = isset( $job['job_id'] ) ? (string) $job['job_id'] : '';
+			if ( $job_url === $maps_url && '' !== $job_id ) {
+				return $job_id;
+			}
+		}
+
+		return null;
 	}
 
 	/**
@@ -183,6 +232,28 @@ class Scraper_Fetcher {
 			$original_url = isset( $place['original_url'] ) ? (string) $place['original_url'] : '';
 			if ( $original_url === $maps_url ) {
 				return $place;
+			}
+		}
+
+		// Fallback for alias URLs: maps.app.goo.gl short links may be stored as
+		// aliases of a canonical place rather than appearing in GET /places directly.
+		// Derive the short code from the URL path and call GET /places/short:{code},
+		// which resolves aliases and returns the canonical place data.
+		$parsed     = wp_parse_url( $maps_url );
+		$host       = isset( $parsed['host'] ) ? (string) $parsed['host'] : '';
+		$short_code = ( 'maps.app.goo.gl' === $host && isset( $parsed['path'] ) )
+			? trim( (string) $parsed['path'], '/' )
+			: '';
+
+		if ( '' !== $short_code ) {
+			$alias_endpoint = self::get_api_url() . '/places/short:' . rawurlencode( $short_code );
+			$alias_response = wp_remote_get( $alias_endpoint, array( 'timeout' => 10, 'headers' => self::get_headers() ) );
+
+			if ( ! is_wp_error( $alias_response ) && 200 === (int) wp_remote_retrieve_response_code( $alias_response ) ) {
+				$canonical = json_decode( wp_remote_retrieve_body( $alias_response ), true );
+				if ( is_array( $canonical ) ) {
+					return $canonical;
+				}
 			}
 		}
 

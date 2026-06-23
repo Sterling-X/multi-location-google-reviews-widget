@@ -12,7 +12,7 @@ class Database_Installer {
 	/**
 	 * Internal schema version for upgrade tracking.
 	 */
-	const SCHEMA_VERSION = '2.0.0';
+	const SCHEMA_VERSION = '2.1.0';
 
 	/**
 	 * Option key storing the last migrated schema version.
@@ -133,9 +133,10 @@ class Database_Installer {
 			name VARCHAR(255) NOT NULL DEFAULT '',
 			photo_url VARCHAR(255) NULL,
 			last_sync DATETIME NULL,
-			sync_status ENUM('pending', 'active', 'completed', 'error') NOT NULL DEFAULT 'pending',
+			sync_status ENUM('pending', 'active', 'completed', 'error', 'duplicate') NOT NULL DEFAULT 'pending',
 			average_rating DECIMAL(2,1) NULL,
 			total_reviews INT UNSIGNED NULL,
+			scraper_place_id VARCHAR(255) NULL,
 			PRIMARY KEY  (id),
 			UNIQUE KEY uniq_google_place_id (google_place_id)
 		) ENGINE=InnoDB {$charset_collate};";
@@ -173,6 +174,8 @@ class Database_Installer {
 		dbDelta( $error_logs_sql );
 
 		self::maybe_add_location_summary_columns( $locations_table );
+		self::maybe_add_scraper_place_id_column( $locations_table );
+		self::maybe_add_duplicate_sync_status( $locations_table );
 		self::maybe_add_foreign_key( $reviews_table, $locations_table );
 	}
 
@@ -197,6 +200,53 @@ class Database_Installer {
 		if ( ! in_array( 'total_reviews', $columns, true ) ) {
 			$wpdb->query( "ALTER TABLE `{$locations_table}` ADD COLUMN total_reviews INT UNSIGNED NULL AFTER average_rating" );
 		}
+	}
+
+	/**
+	 * Add scraper_place_id column to locations table if it does not yet exist.
+	 *
+	 * @param string $locations_table Locations table name.
+	 * @return void
+	 */
+	private static function maybe_add_scraper_place_id_column( $locations_table ) {
+		global $wpdb;
+
+		$columns = $wpdb->get_col( "SHOW COLUMNS FROM `{$locations_table}`", 0 );
+		if ( ! is_array( $columns ) || in_array( 'scraper_place_id', $columns, true ) ) {
+			return;
+		}
+
+		$wpdb->query( "ALTER TABLE `{$locations_table}` ADD COLUMN scraper_place_id VARCHAR(255) NULL AFTER total_reviews" );
+	}
+
+	/**
+	 * Extend the sync_status ENUM to include 'duplicate' if not already present.
+	 *
+	 * @param string $locations_table Locations table name.
+	 * @return void
+	 */
+	private static function maybe_add_duplicate_sync_status( $locations_table ) {
+		global $wpdb;
+
+		$row = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+				WHERE TABLE_SCHEMA = DATABASE()
+				  AND TABLE_NAME = %s
+				  AND COLUMN_NAME = 'sync_status'
+				LIMIT 1",
+				$locations_table
+			)
+		);
+
+		if ( ! $row || false !== strpos( (string) $row->COLUMN_TYPE, "'duplicate'" ) ) {
+			return;
+		}
+
+		$wpdb->query(
+			"ALTER TABLE `{$locations_table}`
+			MODIFY COLUMN sync_status ENUM('pending','active','completed','error','duplicate') NOT NULL DEFAULT 'pending'"
+		);
 	}
 
 	/**

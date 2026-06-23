@@ -101,7 +101,7 @@ class Review_Syncer {
 		$locations_table = $wpdb->prefix . 'mlgr_locations';
 		$location        = $wpdb->get_row(
 			$wpdb->prepare(
-				"SELECT id, google_place_id, name FROM {$locations_table} WHERE id = %d LIMIT 1",
+				"SELECT id, google_place_id, name, scraper_place_id FROM {$locations_table} WHERE id = %d LIMIT 1",
 				$location_id
 			),
 			ARRAY_A
@@ -148,10 +148,14 @@ class Review_Syncer {
 				return;
 			}
 
-			// Job complete — locate the place and import.
-			$place = $fetcher->find_place_by_url( $maps_url );
+			// Job complete — locate the place, check for duplicates, then import.
+			$place = self::resolve_place( $location, $fetcher );
 			if ( ! is_array( $place ) || empty( $place['place_id'] ) ) {
 				self::record_sync_error( $location_id, 'Scrape completed but place not found in scraper API.' );
+				return;
+			}
+
+			if ( ! self::check_and_persist_place( $location_id, $location, (string) $place['place_id'] ) ) {
 				return;
 			}
 
@@ -163,8 +167,11 @@ class Review_Syncer {
 		if ( ! $cursor['force_scrape'] ) {
 			// Check whether the scraper already has data for this URL (e.g. we
 			// just ran the scraper manually before adding the location to WP).
-			$place = $fetcher->find_place_by_url( $maps_url );
+			$place = self::resolve_place( $location, $fetcher );
 			if ( is_array( $place ) && ! empty( $place['place_id'] ) ) {
+				if ( ! self::check_and_persist_place( $location_id, $location, (string) $place['place_id'] ) ) {
+					return;
+				}
 				self::import_place_reviews( $location_id, (string) $place['place_id'], $place, $fetcher );
 				return;
 			}
@@ -308,6 +315,151 @@ class Review_Syncer {
 		}
 
 		return $normalized;
+	}
+
+	/**
+	 * Resolve the canonical scraper place for a location.
+	 *
+	 * Uses the stored scraper_place_id as a fast path on all syncs after the
+	 * first. Falls back to find_place_by_url() when the stored ID is absent or
+	 * has become stale (e.g. the scraper database was reset).
+	 *
+	 * @param array          $location Location row including scraper_place_id.
+	 * @param Scraper_Fetcher $fetcher  Fetcher instance.
+	 * @return array|null Place data array, or null if not found.
+	 */
+	private static function resolve_place( $location, $fetcher ) {
+		$stored_place_id = isset( $location['scraper_place_id'] ) ? trim( (string) $location['scraper_place_id'] ) : '';
+		$maps_url        = isset( $location['google_place_id'] ) ? (string) $location['google_place_id'] : '';
+
+		if ( '' !== $stored_place_id ) {
+			$place = $fetcher->get_place_info( $stored_place_id );
+			if ( is_array( $place ) && ! empty( $place['place_id'] ) ) {
+				return $place;
+			}
+			// Stored ID is stale — fall through to URL-based lookup.
+		}
+
+		return $fetcher->find_place_by_url( $maps_url );
+	}
+
+	/**
+	 * Check for a duplicate location sharing the same scraper place, then
+	 * persist the canonical place_id for future syncs if none is found.
+	 *
+	 * Returns false and marks the location as a duplicate when another location
+	 * row already holds the same scraper_place_id. Returns true otherwise.
+	 *
+	 * @param int    $location_id      Current location ID.
+	 * @param array  $location         Current location row.
+	 * @param string $scraper_place_id Resolved canonical place_id.
+	 * @return bool False if a duplicate was found, true if safe to import.
+	 */
+	private static function check_and_persist_place( $location_id, $location, $scraper_place_id ) {
+		$duplicate = self::find_duplicate_location( $location_id, $scraper_place_id );
+
+		if ( null !== $duplicate ) {
+			$dup_name  = isset( $duplicate['name'] ) && '' !== (string) $duplicate['name']
+				? '"' . (string) $duplicate['name'] . '" (Location #' . absint( $duplicate['id'] ) . ')'
+				: 'Location #' . absint( $duplicate['id'] );
+			self::mark_as_duplicate(
+				$location_id,
+				'Duplicate place — already tracked as ' . $dup_name . '. No reviews were imported.'
+			);
+			return false;
+		}
+
+		// Persist on first successful resolution so future syncs skip URL lookup.
+		$stored = isset( $location['scraper_place_id'] ) ? trim( (string) $location['scraper_place_id'] ) : '';
+		if ( '' === $stored ) {
+			self::persist_scraper_place_id( $location_id, $scraper_place_id );
+			// Update local copy so the in-memory location row stays consistent.
+		}
+
+		return true;
+	}
+
+	/**
+	 * Find another location row that already holds the given scraper place_id.
+	 *
+	 * @param int    $current_location_id Location to exclude from the search.
+	 * @param string $scraper_place_id    Canonical scraper place_id to look for.
+	 * @return array|null Matching location row (id, name), or null if none.
+	 */
+	private static function find_duplicate_location( $current_location_id, $scraper_place_id ) {
+		global $wpdb;
+
+		$locations_table = $wpdb->prefix . 'mlgr_locations';
+		$row             = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT id, name FROM {$locations_table}
+				WHERE scraper_place_id = %s AND id != %d
+				LIMIT 1",
+				$scraper_place_id,
+				absint( $current_location_id )
+			),
+			ARRAY_A
+		);
+
+		return is_array( $row ) ? $row : null;
+	}
+
+	/**
+	 * Persist the canonical scraper place_id to the location row.
+	 *
+	 * @param int    $location_id      Location ID.
+	 * @param string $scraper_place_id Canonical place_id from the scraper API.
+	 * @return void
+	 */
+	private static function persist_scraper_place_id( $location_id, $scraper_place_id ) {
+		global $wpdb;
+
+		$locations_table = $wpdb->prefix . 'mlgr_locations';
+		$wpdb->update(
+			$locations_table,
+			array( 'scraper_place_id' => $scraper_place_id ),
+			array( 'id' => absint( $location_id ) ),
+			array( '%s' ),
+			array( '%d' )
+		);
+	}
+
+	/**
+	 * Record a duplicate-place detection and set sync_status to 'duplicate'.
+	 *
+	 * The message is stored in the shared error log (same format as
+	 * record_sync_error) so it appears in the Last Error column, but the status
+	 * is set to 'duplicate' rather than 'error' to distinguish it in the UI.
+	 *
+	 * @param int    $location_id Location ID.
+	 * @param string $message     Human-readable duplicate explanation.
+	 * @return void
+	 */
+	private static function mark_as_duplicate( $location_id, $message ) {
+		$location_id = absint( $location_id );
+		if ( $location_id <= 0 ) {
+			return;
+		}
+
+		$error_message = self::sanitize_error_text( $message );
+
+		$errors                          = self::get_error_log();
+		$errors[ (string) $location_id ] = array(
+			'message' => $error_message,
+			'time'    => current_time( 'mysql' ),
+			'context' => '',
+		);
+		update_option( self::ERROR_LOG_OPTION, $errors, false );
+
+		self::update_location_status( $location_id, 'duplicate' );
+
+		if ( function_exists( 'error_log' ) ) {
+			error_log( sprintf( // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+				'[MLGR] Location %d marked as duplicate: %s',
+				$location_id,
+				$error_message
+			) );
+		}
 	}
 
 	/**
