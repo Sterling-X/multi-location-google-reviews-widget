@@ -151,6 +151,12 @@ class Review_Syncer {
 			// Job complete — locate the place, check for duplicates, then import.
 			$place = self::resolve_place( $location, $fetcher );
 			if ( ! is_array( $place ) || empty( $place['place_id'] ) ) {
+				// The scraper may have silently updated an existing place for a
+				// different URL of the same business without creating a new entry.
+				// Scan all scraper places to catch this as a duplicate.
+				if ( self::try_detect_duplicate_by_place_scan( $location_id, $fetcher ) ) {
+					return;
+				}
 				self::record_sync_error( $location_id, 'Scrape completed but place not found in scraper API.' );
 				return;
 			}
@@ -377,6 +383,52 @@ class Review_Syncer {
 		}
 
 		return true;
+	}
+
+	/**
+	 * Fallback duplicate detection used when find_place_by_url() fails after a
+	 * completed scrape job.
+	 *
+	 * The scraper may recognise a second URL as an already-known place and simply
+	 * update the existing entry without creating a new row or alias. In that case
+	 * GET /places contains no entry for the submitted URL, so resolve_place()
+	 * returns null. This method fetches every scraper place and checks whether any
+	 * of their place_ids matches a stored scraper_place_id in our locations table.
+	 * When a match is found the current location is marked as a duplicate.
+	 *
+	 * @param int            $location_id Current location ID.
+	 * @param Scraper_Fetcher $fetcher     Fetcher instance.
+	 * @return bool True if a duplicate was found and marked, false otherwise.
+	 */
+	private static function try_detect_duplicate_by_place_scan( $location_id, $fetcher ) {
+		$all_places = $fetcher->list_all_places();
+		if ( ! is_array( $all_places ) ) {
+			return false;
+		}
+
+		foreach ( $all_places as $place ) {
+			if ( ! is_array( $place ) ) {
+				continue;
+			}
+			$candidate_id = isset( $place['place_id'] ) ? trim( (string) $place['place_id'] ) : '';
+			if ( '' === $candidate_id ) {
+				continue;
+			}
+
+			$existing = self::find_duplicate_location( $location_id, $candidate_id );
+			if ( null !== $existing ) {
+				$dup_name = isset( $existing['name'] ) && '' !== (string) $existing['name']
+					? '"' . (string) $existing['name'] . '" (Location #' . absint( $existing['id'] ) . ')'
+					: 'Location #' . absint( $existing['id'] );
+				self::mark_as_duplicate(
+					$location_id,
+					'Duplicate place — this URL resolves to the same place already tracked as ' . $dup_name . '.'
+				);
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	/**

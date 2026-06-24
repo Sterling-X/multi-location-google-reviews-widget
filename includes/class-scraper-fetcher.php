@@ -174,7 +174,7 @@ class Scraper_Fetcher {
 		}
 
 		$endpoint = self::get_api_url() . '/jobs/' . rawurlencode( $job_id );
-		$response = wp_remote_get( $endpoint, array( 'timeout' => 10, 'headers' => self::get_headers() ) );
+		$response = wp_remote_get( $endpoint, array( 'timeout' => 30, 'headers' => self::get_headers() ) );
 
 		if ( is_wp_error( $response ) ) {
 			$result['error'] = $response->get_error_message();
@@ -202,6 +202,23 @@ class Scraper_Fetcher {
 	}
 
 	/**
+	 * Fetch every place entry from the scraper API.
+	 *
+	 * @return array|null Indexed array of place data arrays, or null on failure.
+	 */
+	public function list_all_places() {
+		$endpoint = self::get_api_url() . '/places';
+		$response = wp_remote_get( $endpoint, array( 'timeout' => 10, 'headers' => self::get_headers() ) );
+
+		if ( is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
+			return null;
+		}
+
+		$places = json_decode( wp_remote_retrieve_body( $response ), true );
+		return is_array( $places ) ? $places : null;
+	}
+
+	/**
 	 * Search the scraper's place list for an entry matching the given Google Maps URL.
 	 *
 	 * @param string $maps_url Google Maps URL to look up.
@@ -225,14 +242,27 @@ class Scraper_Fetcher {
 			return null;
 		}
 
+		// Prefer canonical hex entries (place_id not prefixed with 'short:') over
+		// temporary placeholder entries the scraper creates during resolution.
+		$short_fallback = null;
 		foreach ( $places as $place ) {
 			if ( ! is_array( $place ) ) {
 				continue;
 			}
 			$original_url = isset( $place['original_url'] ) ? (string) $place['original_url'] : '';
-			if ( $original_url === $maps_url ) {
+			if ( $original_url !== $maps_url ) {
+				continue;
+			}
+			$place_id_val = isset( $place['place_id'] ) ? (string) $place['place_id'] : '';
+			if ( 0 !== strpos( $place_id_val, 'short:' ) ) {
 				return $place;
 			}
+			if ( null === $short_fallback ) {
+				$short_fallback = $place;
+			}
+		}
+		if ( null !== $short_fallback ) {
+			return $short_fallback;
 		}
 
 		// Fallback for alias URLs: maps.app.goo.gl short links may be stored as
